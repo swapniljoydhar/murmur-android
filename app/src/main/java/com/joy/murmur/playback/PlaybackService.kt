@@ -58,6 +58,8 @@ class PlaybackService : MediaSessionService() {
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val persistenceMutex = Mutex()
+    private val readAloudPositionMutex = Mutex()
+    private val readAloudPositionWrites = ReadAloudPositionWriteTracker()
     private lateinit var player: ExoPlayer
     private lateinit var sleepTimer: SleepTimer
     private lateinit var store: PlaybackStore
@@ -147,7 +149,7 @@ class PlaybackService : MediaSessionService() {
                     continuationJob = null
                     continuationDocumentId = null
                 }
-                serviceScope.launch(Dispatchers.IO) { runCatching { persistReadAloudPosition(segment) } }
+                persistReadAloudPositionAsync(segment)
                 updateReplayGainForCurrentTrack()
             }
 
@@ -174,9 +176,10 @@ class PlaybackService : MediaSessionService() {
 
             override fun onPlayerError(error: PlaybackException) {
                 val segment = player.currentMediaItem?.mediaId?.let(::parseReadAloudMediaId) ?: return
+                val writeToken = readAloudPositionWrites.begin(segment.documentId)
                 serviceScope.launch(Dispatchers.IO) {
                     try {
-                        persistReadAloudPosition(segment)
+                        persistReadAloudPosition(segment, writeToken)
                     } catch (cancelled: CancellationException) {
                         throw cancelled
                     } catch (_: Exception) {
@@ -254,8 +257,11 @@ class PlaybackService : MediaSessionService() {
         // Persist final state synchronously
         val savedState = snapshotPlayerState()
         val readAloudSegment = player.currentMediaItem?.mediaId?.let(::parseReadAloudMediaId)
+        val readAloudPositionToken = readAloudSegment?.let { readAloudPositionWrites.begin(it.documentId) }
         runBlocking(Dispatchers.IO) {
-            readAloudSegment?.let { runCatching { persistReadAloudPosition(it) } }
+            readAloudSegment?.let { segment ->
+                readAloudPositionToken?.let { token -> runCatching { persistReadAloudPosition(segment, token) } }
+            }
             persistSnapshot(savedState)
         }
 
@@ -359,7 +365,7 @@ class PlaybackService : MediaSessionService() {
 
     private fun persistCurrentReadAloudPosition() {
         val segment = player.currentMediaItem?.mediaId?.let(::parseReadAloudMediaId) ?: return
-        serviceScope.launch(Dispatchers.IO) { runCatching { persistReadAloudPosition(segment) } }
+        persistReadAloudPositionAsync(segment)
     }
 
     private fun cancelReadAloudWork() {
@@ -371,15 +377,31 @@ class PlaybackService : MediaSessionService() {
         readAloudStartDocumentId = null
     }
 
-    private suspend fun persistReadAloudPosition(segment: ReadAloudSegmentInfo) {
-        val documents = ReaderDocumentStore(PlaybackDatabase.getInstance(this@PlaybackService))
-        val document = documents.getDocument(segment.documentId)
-        val position = if (document?.mimeType == "application/pdf") {
-            segment.pageStart
-        } else {
-            segment.pageStart + segment.sourceOffset
+    private fun persistReadAloudPositionAsync(segment: ReadAloudSegmentInfo) {
+        val writeToken = readAloudPositionWrites.begin(segment.documentId)
+        serviceScope.launch(Dispatchers.IO) {
+            runCatching { persistReadAloudPosition(segment, writeToken) }
         }
-        documents.savePosition(segment.documentId, position)
+    }
+
+    private suspend fun persistReadAloudPosition(segment: ReadAloudSegmentInfo, writeToken: Long) {
+        readAloudPositionMutex.withLock {
+            try {
+                if (!readAloudPositionWrites.isCurrent(segment.documentId, writeToken)) return@withLock
+                val documents = ReaderDocumentStore(PlaybackDatabase.getInstance(this@PlaybackService))
+                val document = documents.getDocument(segment.documentId)
+                val position = if (document?.mimeType == "application/pdf") {
+                    segment.pageStart
+                } else {
+                    segment.pageStart + segment.sourceOffset
+                }
+                if (readAloudPositionWrites.isCurrent(segment.documentId, writeToken)) {
+                    documents.savePosition(segment.documentId, position)
+                }
+            } finally {
+                readAloudPositionWrites.finish(segment.documentId, writeToken)
+            }
+        }
     }
 
     private suspend fun continueReadAloud(segment: ReadAloudSegmentInfo, endedItem: MediaItem) {
