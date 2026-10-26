@@ -1,31 +1,32 @@
-﻿package com.joy.murmur.data.storage
+package com.joy.murmur.data.storage
 
 import android.content.Context
+import android.content.ContentValues
+import android.database.Cursor
+import android.net.Uri
+import android.os.StatFs
+import android.util.Base64
 import androidx.documentfile.provider.DocumentFile
-import androidx.lifecycle.LiveData
-import androidx.lifecycle.MutableLiveData
 import com.joy.murmur.data.playback.PlaybackDatabase
-import com.joy.murmur.data.playback.PlaybackStore
-import com.joy.murmur.data.speech.TtsCache
+import androidx.room.withTransaction
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.ByteArrayOutputStream
 import java.io.File
 
-class StorageCenter(private val context: Context) {
+class StorageCenter(context: Context, private val db: PlaybackDatabase = PlaybackDatabase.getInstance(context)) {
     private val appContext = context.applicationContext
-    private val db = PlaybackDatabase.getInstance(appContext)
-    private val store = PlaybackStore(db)
+    private val databaseFile = File(db.openHelper.writableDatabase.path ?: appContext.getDatabasePath("murmur.db").absolutePath)
     private val ttsCacheDir = File(appContext.cacheDir, "read-aloud")
-    private val ttsCache = TtsCache(ttsCacheDir)
     private val neuralVoicesDir = File(appContext.filesDir, "neural-voices")
     private val exportsDir = File(appContext.getExternalFilesDir(null) ?: appContext.filesDir, "Murmur/Exports")
     private val tempDir = File(appContext.cacheDir, "temp")
-
-    init {
-        neuralVoicesDir.mkdirs()
-        exportsDir.mkdirs()
-        tempDir.mkdirs()
-    }
+    private val databaseTables = listOf(
+        "listening_progress", "audiobook_library",
+        "audiobook_bookmarks", "audiobook_chapters", "processor_settings", "music_catalog",
+        "music_catalog_state", "music_playlists", "music_playlist_tracks", "reader_documents",
+        "reader_bookmarks", "document_structures", "batch_jobs", "batch_work_units",
+    )
 
     data class StorageUsage(
         val ttsCacheBytes: Long,
@@ -38,89 +39,187 @@ class StorageCenter(private val context: Context) {
     )
 
     suspend fun getStorageUsage(): StorageUsage = withContext(Dispatchers.IO) {
-        val ttsCacheBytes = getDirectorySize(ttsCacheDir)
-        val neuralVoicesBytes = getDirectorySize(neuralVoicesDir)
-        val exportsBytes = getDirectorySize(exportsDir)
-        val databaseBytes = getFileSize(File(db.openHelper.writableDatabase.path))
-        val tempBytes = getDirectorySize(tempDir)
-        val totalBytes = ttsCacheBytes + neuralVoicesBytes + exportsBytes + databaseBytes + tempBytes
-        val availableBytes = getAvailableSpace()
-        StorageUsage(ttsCacheBytes, neuralVoicesBytes, exportsBytes, databaseBytes, tempBytes, totalBytes, availableBytes)
+        val ttsCacheBytes = directorySize(ttsCacheDir)
+        val neuralVoicesBytes = directorySize(neuralVoicesDir)
+        val exportsBytes = directorySize(exportsDir)
+        val databaseBytes = listOf(databaseFile, File("${databaseFile.path}-wal"), File("${databaseFile.path}-shm"))
+            .sumOf(::fileSize)
+        val tempBytes = directorySize(tempDir)
+        StorageUsage(
+            ttsCacheBytes = ttsCacheBytes,
+            neuralVoicesBytes = neuralVoicesBytes,
+            exportsBytes = exportsBytes,
+            databaseBytes = databaseBytes,
+            tempBytes = tempBytes,
+            totalBytes = ttsCacheBytes + neuralVoicesBytes + exportsBytes + databaseBytes + tempBytes,
+            availableBytes = StatFs(appContext.filesDir.absolutePath).let { it.availableBlocksLong * it.blockSizeLong },
+        )
     }
 
-    private fun getDirectorySize(dir: File): Long {
-        if (!dir.exists()) return 0L
-        return dir.walk().filter { it.isFile }.sumOf { it.length() }
-    }
-
-    private fun getFileSize(file: File): Long {
-        return if (file.exists()) file.length() else 0L
-    }
-
-    private fun getAvailableSpace(): Long {
-        val stat = android.os.StatFs(appContext.filesDir.absolutePath)
-        return stat.availableBlocksLong * stat.blockSizeLong
-    }
-
-    suspend fun clearTtsCache(): Long = withContext(Dispatchers.IO) {
-        val before = getDirectorySize(ttsCacheDir)
-        ttsCacheDir.listFiles()?.forEach { it.deleteRecursively() }
-        ttsCache.shutdown()
-        before
-    }
-
-    suspend fun clearTempFiles(): Long = withContext(Dispatchers.IO) {
-        val before = getDirectorySize(tempDir)
-        tempDir.listFiles()?.forEach { it.deleteRecursively() }
-        before
-    }
-
-    suspend fun clearNeuralVoices(): Long = withContext(Dispatchers.IO) {
-        val before = getDirectorySize(neuralVoicesDir)
-        neuralVoicesDir.listFiles()?.forEach { it.deleteRecursively() }
-        before
-    }
-
-    suspend fun clearExports(): Long = withContext(Dispatchers.IO) {
-        val before = getDirectorySize(exportsDir)
-        exportsDir.listFiles()?.forEach { it.deleteRecursively() }
-        before
-    }
-
-    fun getTtsCacheDir(): File = ttsCacheDir
-    fun getNeuralVoicesDir(): File = neuralVoicesDir
-    fun getExportsDir(): File = exportsDir
-    fun getTempDir(): File = tempDir
-
-    suspend fun exportDatabase(destinationUri: android.net.Uri): Result<android.net.Uri> = withContext(Dispatchers.IO) {
+    suspend fun createBackup(destination: Uri) = withContext(Dispatchers.IO) {
+        val bytes = createBackupBytesInternal()
+        val target = DocumentFile.fromSingleUri(appContext, destination)
+            ?: throw IllegalArgumentException("Choose a writable backup file.")
         try {
-            val destFile = androidx.documentfile.provider.DocumentFile.fromSingleUri(appContext, destinationUri)
-                ?.createFile("application/vnd.sqlite3", "murmur.db")
-                ?: return@withContext Result.failure(IllegalArgumentException("Invalid destination"))
-            
-            val srcFile = File(db.openHelper.writableDatabase.path)
-            appContext.contentResolver.openOutputStream(destFile.uri)?.use { output -> srcFile.inputStream().use { input -> input.copyTo(output) } }
-            Result.success(destFile.uri)
-        } catch (e: Exception) {
-            Result.failure(e)
+            val output = appContext.contentResolver.openOutputStream(target.uri, "wt")
+                ?: throw IllegalStateException("The selected location could not be written.")
+            output.use { it.write(bytes); it.flush() }
+        } catch (failure: Exception) {
+            target.delete()
+            throw failure
         }
+        inspectBackupBytes(bytes)
     }
 
-    suspend fun importDatabase(sourceUri: android.net.Uri): Result<Unit> = withContext(Dispatchers.IO) {
-        try {
-            val srcFile = androidx.documentfile.provider.DocumentFile.fromSingleUri(appContext, sourceUri)
-                ?: return@withContext Result.failure(IllegalArgumentException("Invalid source"))
-            
-            val destFile = File(db.openHelper.writableDatabase.path)
-            appContext.contentResolver.openInputStream(srcFile.uri)?.use { input ->
-                appContext.contentResolver.openOutputStream(android.net.Uri.fromFile(destFile))?.use { output ->
-                    input.copyTo(output)
+    internal suspend fun createBackupBytes() = withContext(Dispatchers.IO) { createBackupBytesInternal() }
+
+    private suspend fun createBackupBytesInternal(): ByteArray {
+        val content = db.withTransaction {
+            val sqlDb = db.openHelper.writableDatabase
+            val tableData = databaseTables.associateWith { table ->
+                val columns = tableColumns(table)
+                val rows = sqlDb.query("SELECT * FROM ${quote(table)} ORDER BY rowid").use { cursor ->
+                    buildList {
+                        while (cursor.moveToNext()) add(List(cursor.columnCount) { index -> cursor.cell(index) })
+                    }
+                }
+                MurmurBackupTable(columns, rows)
+            }
+            MurmurBackupContent(sqlDb.version, System.currentTimeMillis(), tableData)
+        }
+        return MurmurBackupFormat.encode(content)
+    }
+
+    suspend fun inspectBackup(source: Uri) = withContext(Dispatchers.IO) {
+        inspectBackupBytes(readBackup(source))
+    }
+
+    internal suspend fun inspectBackupBytes(bytes: ByteArray) = withContext(Dispatchers.IO) {
+        val envelope = MurmurBackupFormat.decode(bytes, db.openHelper.writableDatabase.version)
+        validateSchema(envelope.content)
+        validateCellValues(envelope.content)
+        MurmurBackupFormat.summary(envelope.content)
+    }
+
+    suspend fun restoreBackup(source: Uri) = withContext(Dispatchers.IO) {
+        restoreBackupBytesInternal(readBackup(source))
+    }
+
+    internal suspend fun restoreBackupBytes(bytes: ByteArray) = withContext(Dispatchers.IO) {
+        restoreBackupBytesInternal(bytes)
+    }
+
+    private suspend fun restoreBackupBytesInternal(bytes: ByteArray): MurmurBackupSummary {
+        val content = MurmurBackupFormat.decode(bytes, db.openHelper.writableDatabase.version).content
+        validateSchema(content)
+        val preparedRows = validateCellValues(content)
+        require(db.playbackDao().getQueue().isEmpty()) { "Clear the playback queue before restoring." }
+        db.withTransaction {
+            val sqlDb = db.openHelper.writableDatabase
+            sqlDb.query("SELECT COUNT(*) FROM playback_queue").use { cursor ->
+                check(cursor.moveToFirst() && cursor.getLong(0) == 0L) { "Clear the playback queue before restoring." }
+            }
+            val dependencyOrder = foreignKeyOrder()
+            dependencyOrder.asReversed().forEach { table -> sqlDb.execSQL("DELETE FROM ${quote(table)}") }
+            dependencyOrder.forEach { table ->
+                preparedRows.getValue(table).forEach { values ->
+                    check(sqlDb.insert(table, android.database.sqlite.SQLiteDatabase.CONFLICT_ABORT, values) != -1L) {
+                        "Could not restore a record in $table."
+                    }
                 }
             }
-            Result.success(Unit)
-        } catch (e: Exception) {
-            Result.failure(e)
+            sqlDb.query("PRAGMA foreign_key_check").use { cursor ->
+                check(!cursor.moveToFirst()) { "Backup contains broken record links." }
+            }
+        }
+        return MurmurBackupFormat.summary(content)
+    }
+
+    private fun readBackup(uri: Uri): ByteArray {
+        val input = appContext.contentResolver.openInputStream(uri)
+            ?: throw IllegalArgumentException("The selected backup could not be opened.")
+        return input.use { stream ->
+            val output = ByteArrayOutputStream()
+            val buffer = ByteArray(8192)
+            var total = 0
+            while (true) {
+                val count = stream.read(buffer)
+                if (count < 0) break
+                total += count
+                if (total > MurmurBackupFormat.MAX_BACKUP_BYTES) throw IllegalArgumentException("Backup exceeds the 64 MiB size limit.")
+                output.write(buffer, 0, count)
+            }
+            output.toByteArray()
         }
     }
-}
 
+    private fun validateSchema(content: MurmurBackupContent) {
+        require(content.tables.keys == databaseTables.toSet()) { "Backup tables do not match this Murmur database." }
+        content.tables.forEach { (table, data) ->
+            require(data.columns == tableColumns(table)) { "Backup table structure differs for $table." }
+        }
+    }
+
+    private fun validateCellValues(content: MurmurBackupContent): Map<String, List<ContentValues>> =
+        content.tables.mapValues { (_, table) -> table.rows.map { row ->
+            ContentValues(table.columns.size).apply {
+                table.columns.forEachIndexed { index, column ->
+                    val cell = row[index]
+                    when (cell.type) {
+                        "null" -> putNull(column)
+                        "integer" -> put(column, cell.value!!.toLong())
+                        "real" -> put(column, cell.value!!.toDouble().also { require(it.isFinite()) })
+                        "text" -> put(column, cell.value!!)
+                        "blob" -> put(column, Base64.decode(cell.value!!, Base64.NO_WRAP))
+                        else -> error("Unsupported backup value type.")
+                    }
+                }
+            }
+        } }
+
+    private fun tableColumns(table: String): List<String> {
+        require(table in databaseTables)
+        return db.openHelper.readableDatabase.query("PRAGMA table_info(${quote(table)})").use { cursor ->
+            val nameIndex = cursor.getColumnIndexOrThrow("name")
+            buildList { while (cursor.moveToNext()) add(cursor.getString(nameIndex)) }
+        }
+    }
+
+    private fun foreignKeyOrder(): List<String> {
+        val parents = databaseTables.associateWith { table ->
+            db.openHelper.readableDatabase.query("PRAGMA foreign_key_list(${quote(table)})").use { cursor ->
+                val parentIndex = cursor.getColumnIndexOrThrow("table")
+                buildSet { while (cursor.moveToNext()) add(cursor.getString(parentIndex)) }
+            }
+        }
+        val ordered = mutableListOf<String>()
+        val visiting = mutableSetOf<String>()
+        val visited = mutableSetOf<String>()
+        fun visit(table: String) {
+            if (table in visited) return
+            check(visiting.add(table)) { "Database contains a cyclic foreign-key relationship." }
+            parents.getValue(table).filter { it in databaseTables }.forEach(::visit)
+            visiting.remove(table)
+            visited.add(table)
+            ordered.add(table)
+        }
+        databaseTables.forEach(::visit)
+        return ordered
+    }
+
+    private fun quote(identifier: String) = "\"${identifier.replace("\"", "\"\"")}\""
+
+    private fun Cursor.cell(index: Int): MurmurBackupCell = when (getType(index)) {
+        Cursor.FIELD_TYPE_NULL -> MurmurBackupCell("null")
+        Cursor.FIELD_TYPE_INTEGER -> MurmurBackupCell("integer", getLong(index).toString())
+        Cursor.FIELD_TYPE_FLOAT -> MurmurBackupCell("real", getDouble(index).toString())
+        Cursor.FIELD_TYPE_STRING -> MurmurBackupCell("text", getString(index))
+        Cursor.FIELD_TYPE_BLOB -> MurmurBackupCell("blob", Base64.encodeToString(getBlob(index), Base64.NO_WRAP))
+        else -> error("Unsupported SQLite value type.")
+    }
+
+    private fun directorySize(directory: File): Long =
+        if (directory.isDirectory) directory.walkTopDown().filter(File::isFile).sumOf(::fileSize) else 0L
+
+    private fun fileSize(file: File): Long = file.takeIf(File::isFile)?.length() ?: 0L
+}

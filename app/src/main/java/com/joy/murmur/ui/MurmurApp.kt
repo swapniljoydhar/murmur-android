@@ -150,6 +150,7 @@ private enum class Destination(val route: String, val title: String, val descrip
 private enum class SettingsTab(val label: String) {
     APPEARANCE("Appearance"),
     VOICE("Read Aloud Voice"),
+    STORAGE("Storage"),
 }
 
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
@@ -261,7 +262,7 @@ private fun MurmurNavigation(
             ReaderScreen(entry.arguments?.getString("documentId").orEmpty(), documentLibraryRepository, playbackController, settingsRepository)
         }
         composable(Destination.Settings.route) {
-            SettingsScreen(settingsRepository)
+            SettingsScreen(settingsRepository, playback.current != null)
         }
         composable(Destination.OemFix.route) {
             val fixLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { _ ->
@@ -2156,7 +2157,7 @@ private fun queryDisplayName(resolver: ContentResolver, uri: Uri): String {
 }
 
 @Composable
-private fun SettingsScreen(settingsRepository: SettingsRepository) {
+private fun SettingsScreen(settingsRepository: SettingsRepository, playbackInUse: Boolean) {
     val appearanceMode by settingsRepository.appearanceMode.collectAsState(initial = AppearanceMode.SYSTEM)
     val scope = rememberCoroutineScope()
     var selectedTab by remember { mutableStateOf(SettingsTab.APPEARANCE) }
@@ -2182,6 +2183,7 @@ private fun SettingsScreen(settingsRepository: SettingsRepository) {
                     scope.launch { settingsRepository.setAppearanceMode(mode) }
                 }
                 SettingsTab.VOICE -> VoiceSettingsContent(settingsRepository)
+                SettingsTab.STORAGE -> StorageCenterScreen(playbackInUse)
             }
         }
     }
