@@ -18,13 +18,10 @@ import androidx.media3.session.SessionToken
 import com.google.common.util.concurrent.ListenableFuture
 import com.joy.murmur.data.playback.PlaybackStore
 import com.joy.murmur.data.playback.QueueItemEntity
-import com.joy.murmur.data.playback.ProcessorSettingsEntity
 import com.joy.murmur.data.speech.SystemTtsSpeechGenerator
 import com.joy.murmur.playback.PlaybackContentType
 import com.joy.murmur.playback.QueueInsertMode
 import com.joy.murmur.playback.SelectedAudio
-import com.joy.murmur.playback.ProcessingInfo
-import com.joy.murmur.playback.OutputInfo
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -121,75 +118,6 @@ class PlaybackController(
             path.endsWith(".dsf") -> "audio/x-dsf"
             path.endsWith(".dff") -> "audio/x-dff"
             else -> "audio/mpeg"
-        }
-    }
-
-    suspend fun getProcessingInfo(): ProcessingInfo = withContext(Dispatchers.IO) {
-        val settings = store.getProcessorSettings()
-        if (settings != null) {
-            ProcessingInfo(
-                replayGainEnabled = settings.replayGainEnabled,
-                replayGainStatus = if (settings.replayGainEnabled) "Active" else "Disabled",
-                equalizerEnabled = settings.equalizerEnabled,
-                equalizerStatus = if (settings.equalizerEnabled) "Active" else "Disabled",
-                crossfeedEnabled = settings.crossfeedEnabled,
-                crossfeedStatus = if (settings.crossfeedEnabled) "Active" else "Disabled",
-                headroomEnabled = settings.headroomEnabled,
-                headroomStatus = if (settings.headroomEnabled) "Active" else "Disabled",
-                balanceEnabled = settings.balanceEnabled,
-                balanceStatus = if (settings.balanceEnabled) "Active" else "Disabled",
-                ditherEnabled = settings.ditherEnabled,
-                ditherStatus = if (settings.ditherEnabled) "Active" else "Disabled",
-            )
-        } else {
-            ProcessingInfo(
-                replayGainEnabled = false, replayGainStatus = "Unknown",
-                equalizerEnabled = false, equalizerStatus = "Unknown",
-                crossfeedEnabled = false, crossfeedStatus = "Unknown",
-                headroomEnabled = false, headroomStatus = "Unknown",
-                balanceEnabled = false, balanceStatus = "Unknown",
-                ditherEnabled = false, ditherStatus = "Unknown",
-            )
-        }
-    }
-
-    suspend fun getOutputInfo(): OutputInfo? = withContext(Dispatchers.IO) {
-        try {
-            val audioManager = appContext.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
-            val devices = audioManager.getDevices(android.media.AudioManager.GET_DEVICES_OUTPUTS)
-            val primaryDevice = devices.firstOrNull { it.type == android.media.AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
-                ?: devices.firstOrNull()
-                ?: return@withContext null
-
-            val volume = audioManager.getStreamVolume(android.media.AudioManager.STREAM_MUSIC).toFloat() /
-                audioManager.getStreamMaxVolume(android.media.AudioManager.STREAM_MUSIC)
-
-            OutputInfo(
-                route = when (primaryDevice.type) {
-                    android.media.AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> "Speaker"
-                    android.media.AudioDeviceInfo.TYPE_WIRED_HEADSET, android.media.AudioDeviceInfo.TYPE_WIRED_HEADPHONES -> "Wired Headset"
-                    android.media.AudioDeviceInfo.TYPE_BLUETOOTH_A2DP, android.media.AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> "Bluetooth"
-                    android.media.AudioDeviceInfo.TYPE_USB_DEVICE, android.media.AudioDeviceInfo.TYPE_USB_HEADSET -> "USB"
-                    android.media.AudioDeviceInfo.TYPE_HDMI -> "HDMI"
-                    else -> "Unknown"
-                },
-                deviceName = primaryDevice.productName.toString(),
-                outputSampleRate = primaryDevice.sampleRates.firstOrNull() ?: 44100,
-                outputBitDepth = 16,
-                outputChannels = primaryDevice.channelMasks.firstOrNull()?.let { mask ->
-                    when (mask) {
-                        android.media.AudioFormat.CHANNEL_OUT_STEREO -> "2"
-                        android.media.AudioFormat.CHANNEL_OUT_MONO -> "1"
-                        android.media.AudioFormat.CHANNEL_OUT_5POINT1 -> "6"
-                        android.media.AudioFormat.CHANNEL_OUT_7POINT1 -> "8"
-                        else -> "2"
-                    }
-                } ?: "2",
-                latencyMs = 0,
-                volume = volume
-            )
-        } catch (e: Exception) {
-            null
         }
     }
 

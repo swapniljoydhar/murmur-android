@@ -13,12 +13,6 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
-import com.joy.murmur.playback.BalanceProcessor
-import com.joy.murmur.playback.CrossfeedProcessor
-import com.joy.murmur.playback.DitherProcessor
-import com.joy.murmur.playback.EqualizerProcessor
-import com.joy.murmur.playback.HeadroomLimiterProcessor
-import com.joy.murmur.playback.ReplayGainProcessor
 import com.joy.murmur.data.playback.PlaybackDatabase
 import com.joy.murmur.data.playback.PlaybackStore
 import com.joy.murmur.data.playback.PlaybackRestorePolicy
@@ -63,19 +57,12 @@ class PlaybackService : MediaSessionService() {
     private lateinit var player: ExoPlayer
     private lateinit var sleepTimer: SleepTimer
     private lateinit var store: PlaybackStore
-    private lateinit var replayGainProcessor: ReplayGainProcessor
-    private lateinit var equalizerProcessor: EqualizerProcessor
-    private lateinit var crossfeedProcessor: CrossfeedProcessor
-    private lateinit var headroomLimiterProcessor: HeadroomLimiterProcessor
-    private lateinit var balanceProcessor: BalanceProcessor
-    private lateinit var ditherProcessor: DitherProcessor
     private var mediaSession: MediaSession? = null
     private var restorationComplete = false
     private var continuationJob: Job? = null
     @Volatile private var continuationDocumentId: String? = null
     @Volatile private var readAloudStartJob: Job? = null
     @Volatile private var readAloudStartDocumentId: String? = null
-    private val processors = mutableListOf<MurmurAudioProcessor>()
 
     // Single shared TTS generator instance
     private var ttsGenerator: SystemTtsSpeechGenerator? = null
@@ -83,17 +70,6 @@ class PlaybackService : MediaSessionService() {
     override fun onCreate() {
         super.onCreate()
         store = PlaybackStore(PlaybackDatabase.getInstance(this))
-
-        replayGainProcessor = ReplayGainProcessor()
-        equalizerProcessor = EqualizerProcessor()
-        crossfeedProcessor = CrossfeedProcessor()
-        headroomLimiterProcessor = HeadroomLimiterProcessor()
-        balanceProcessor = BalanceProcessor()
-        ditherProcessor = DitherProcessor()
-        processors.addAll(listOf(
-            replayGainProcessor, equalizerProcessor, crossfeedProcessor,
-            headroomLimiterProcessor, balanceProcessor, ditherProcessor
-        ))
 
         player = ExoPlayer.Builder(this)
             .build()
@@ -275,14 +251,6 @@ class PlaybackService : MediaSessionService() {
             release()
         }
         mediaSession = null
-
-        // Release audio processors (if they have a release method)
-        processors.forEach {
-            if (it is AutoCloseable) {
-                try { it.close() } catch (_: Exception) {}
-            }
-        }
-        processors.clear()
 
         sleepTimer.shutdown()
 
