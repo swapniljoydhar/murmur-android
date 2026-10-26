@@ -77,6 +77,7 @@ class RoomAudiobookLibraryRepository(context: Context, private val store: Audiob
                     title = chapter.title,
                     startMs = chapter.startMs,
                     endMs = chapter.endMs,
+                    source = chapter.source.name,
                 )
             },
         )
@@ -117,7 +118,7 @@ private fun AudiobookChapterEntity.toDomain(audiobookId: String, index: Int) = A
     title = title,
     startMs = startMs,
     endMs = endMs,
-    source = ChapterSource.CONTAINER,
+    source = ChapterSource.entries.firstOrNull { it.name == source } ?: ChapterSource.UNKNOWN,
 )
 
 private suspend fun Uri.toAudiobookEntity(addedAtMillis: Long, extractor: AudiobookMetadataExtractor): AudiobookEntity {

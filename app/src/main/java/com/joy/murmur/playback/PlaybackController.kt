@@ -370,7 +370,12 @@ class PlaybackController(
     fun togglePlayPause() {
         controllerLock.lock()
         try {
-            controller?.let { if (it.isPlaying) it.pause() else it.play() }
+            controller?.let { player ->
+                if (player.isPlaying) player.pause() else {
+                    if (player.playbackState == Player.STATE_IDLE && player.playerError != null) player.prepare()
+                    player.play()
+                }
+            }
         } finally {
             controllerLock.unlock()
         }
@@ -440,6 +445,7 @@ class PlaybackController(
             durationMs = player.duration.takeIf { it >= 0L } ?: 0L,
             isPlaying = player.isPlaying,
             playbackSpeed = player.playbackParameters.speed,
+            hasPlaybackError = player.playerError != null,
         )
     }
 

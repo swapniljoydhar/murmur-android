@@ -29,7 +29,16 @@ data class PlaybackSnapshot(
     val durationMs: Long = 0L,
     val isPlaying: Boolean = false,
     val playbackSpeed: Float = 1f,
+    val hasPlaybackError: Boolean = false,
 ) {
     val current: SelectedAudio?
         get() = items.getOrNull(currentIndex)
 }
+
+fun playbackPositionFraction(positionMs: Long, durationMs: Long): Float {
+    val duration = durationMs.coerceAtLeast(1L)
+    return positionMs.coerceIn(0L, duration).toDouble().div(duration).toFloat()
+}
+
+fun playbackPositionAtFraction(fraction: Float, durationMs: Long): Long =
+    (fraction.coerceIn(0f, 1f).toDouble() * durationMs.coerceAtLeast(0L)).toLong()

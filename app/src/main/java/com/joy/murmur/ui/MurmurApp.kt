@@ -93,6 +93,7 @@ import com.joy.murmur.domain.music.MusicPlaylistRepository
 import com.joy.murmur.domain.music.MusicPlaylistTrack
 import com.joy.murmur.data.music.MusicCatalogRefreshScheduler
 import com.joy.murmur.domain.audiobooks.Audiobook
+import com.joy.murmur.domain.audiobooks.ChapterSource
 import com.joy.murmur.domain.audiobooks.AudiobookLibraryRepository
 import com.joy.murmur.domain.documents.DocumentLibraryRepository
 import com.joy.murmur.domain.documents.ReaderDocument
@@ -105,6 +106,8 @@ import com.joy.murmur.data.speech.VoiceNetworkRequirement
 import com.joy.murmur.playback.PlaybackContentType
 import com.joy.murmur.playback.PlaybackController
 import com.joy.murmur.playback.PlaybackSnapshot
+import com.joy.murmur.playback.playbackPositionAtFraction
+import com.joy.murmur.playback.playbackPositionFraction
 import com.joy.murmur.playback.ReadAloudStatus
 import com.joy.murmur.playback.parseReadAloudMediaId
 import com.joy.murmur.playback.SleepTimer
@@ -289,11 +292,17 @@ private fun MurmurNavigation(
             )
         }
         composable(Destination.NowPlaying.route) {
-            NowPlayingScreen(playback, playbackController, audiobookLibraryRepository) {
-                val documentId = playback.current?.id?.split('|')?.getOrNull(1)?.let(Uri::decode)
-                if (documentId != null) navController.navigate("reader/${Uri.encode(documentId)}")
-                else navController.navigate(Destination.Documents.route)
-            }
+            NowPlayingScreen(
+                snapshot = playback,
+                controller = playbackController,
+                audiobookLibraryRepository = audiobookLibraryRepository,
+                onReturnToDocument = {
+                    val documentId = playback.current?.id?.split('|')?.getOrNull(1)?.let(Uri::decode)
+                    if (documentId != null) navController.navigate("reader/${Uri.encode(documentId)}")
+                    else navController.navigate(Destination.Documents.route)
+                },
+                onOpenAudiobookLibrary = { navController.navigate(Destination.Audiobooks.route) },
+            )
         }
     }
 }
@@ -1844,6 +1853,7 @@ private fun NowPlayingScreen(
     controller: PlaybackController?,
     audiobookLibraryRepository: AudiobookLibraryRepository?,
     onReturnToDocument: () -> Unit,
+    onOpenAudiobookLibrary: () -> Unit,
 ) {
     val current = snapshot.current
     if (current == null) {
@@ -1856,7 +1866,7 @@ private fun NowPlayingScreen(
             audiobookLibraryRepository?.observeBooks()?.collect { books = it }
         }
         val artwork = books.firstOrNull { it.id == current.id }?.coverArt
-        AudiobookPlayerScreen(snapshot, controller, artwork, audiobookLibraryRepository)
+        AudiobookPlayerScreen(snapshot, controller, artwork, audiobookLibraryRepository, onOpenAudiobookLibrary)
         return
     }
     if (current.contentType == PlaybackContentType.READ_ALOUD) {
@@ -1946,6 +1956,7 @@ private fun AudiobookPlayerScreen(
     controller: PlaybackController?,
     artwork: ByteArray?,
     audiobookRepository: AudiobookLibraryRepository?,
+    onOpenAudiobookLibrary: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
     val current = snapshot.current ?: return
@@ -1961,7 +1972,6 @@ private fun AudiobookPlayerScreen(
     }
     val speedSteps = listOf(0.75f, 1f, 1.25f, 1.5f, 1.75f, 2f)
     val speedIndex = speedSteps.indices.minByOrNull { kotlin.math.abs(speedSteps[it] - snapshot.playbackSpeed) } ?: 1
-    val duration = snapshot.durationMs.coerceAtLeast(1L)
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 22.dp, vertical = 22.dp),
         verticalArrangement = Arrangement.spacedBy(20.dp),
@@ -1974,11 +1984,18 @@ private fun AudiobookPlayerScreen(
             current.subtitle?.let { Text(it, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant) }
         }
         SleepTimerControl(controller)
+        if (snapshot.hasPlaybackError) {
+            Text(
+                "Playback stopped. Check that the file is still available and that Murmur has access to it.",
+                color = MaterialTheme.colorScheme.error,
+            )
+            TextButton(onClick = onOpenAudiobookLibrary) { Text("Return to Audiobooks") }
+        }
         Column(Modifier.fillMaxWidth()) {
             Slider(
-                value = snapshot.positionMs.coerceIn(0L, duration).toFloat(),
-                onValueChange = { controller?.seekTo(it.toLong()) },
-                valueRange = 0f..duration.toFloat(),
+                value = playbackPositionFraction(snapshot.positionMs, snapshot.durationMs),
+                onValueChange = { controller?.seekTo(playbackPositionAtFraction(it, snapshot.durationMs)) },
+                valueRange = 0f..1f,
             )
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Text(formatMediaPosition(snapshot.positionMs), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -2050,7 +2067,18 @@ private fun AudiobookPlayerScreen(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween,
                     ) {
-                        Text(chapter.title, Modifier.weight(1f), maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        Column(Modifier.weight(1f)) {
+                            Text(chapter.title, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            Text(
+                                when (chapter.source) {
+                                    ChapterSource.CONTAINER, ChapterSource.ID3, ChapterSource.VORBIS -> "Embedded marker"
+                                    ChapterSource.HEURISTIC -> "Estimated marker"
+                                    ChapterSource.UNKNOWN -> "Marker source unknown"
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
                         Text(formatMediaPosition(chapter.startMs), color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }

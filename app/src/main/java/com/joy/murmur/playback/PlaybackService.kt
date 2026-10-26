@@ -175,7 +175,11 @@ class PlaybackService : MediaSessionService() {
             }
 
             override fun onPlayerError(error: PlaybackException) {
-                val segment = player.currentMediaItem?.mediaId?.let(::parseReadAloudMediaId) ?: return
+                val segment = player.currentMediaItem?.mediaId?.let(::parseReadAloudMediaId)
+                if (segment == null) {
+                    serviceScope.launch { persistPlayerState() }
+                    return
+                }
                 val writeToken = readAloudPositionWrites.begin(segment.documentId)
                 serviceScope.launch(Dispatchers.IO) {
                     try {

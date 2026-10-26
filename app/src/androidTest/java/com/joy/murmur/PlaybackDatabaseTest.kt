@@ -9,14 +9,75 @@ import com.joy.murmur.data.playback.PlaybackDatabase
 import com.joy.murmur.data.playback.PlaybackStore
 import com.joy.murmur.data.playback.QueueItemEntity
 import com.joy.murmur.data.playback.DocumentStructureEntity
+import com.joy.murmur.data.playback.AudiobookEntity
+import com.joy.murmur.data.playback.AudiobookChapterEntity
+import com.joy.murmur.data.playback.AudiobookStore
 import com.joy.murmur.data.playback.ReaderDocumentEntity
 import com.joy.murmur.data.playback.ReaderDocumentStore
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.flow.first
 import org.junit.Assert.assertEquals
 import org.junit.Test
 import java.util.UUID
 
 class PlaybackDatabaseTest {
+    @Test
+    fun audiobookChapterSourceSurvivesDatabaseRecreation() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val databaseName = "audiobook-chapter-source-${UUID.randomUUID()}.db"
+        val bookId = "book-1"
+        val firstDatabase = Room.databaseBuilder(context, PlaybackDatabase::class.java, databaseName).build()
+        val firstStore = AudiobookStore(firstDatabase)
+        firstStore.saveBooks(
+            listOf(AudiobookEntity(bookId, "content://test/book", "Book", null, 60_000L, null, 1L)),
+        )
+        firstStore.replaceChapters(
+            bookId,
+            listOf(AudiobookChapterEntity(bookId, 0, "Chapter 1", 0L, 60_000L, "ID3")),
+        )
+        firstDatabase.close()
+
+        val reopenedDatabase = Room.databaseBuilder(context, PlaybackDatabase::class.java, databaseName).build()
+        assertEquals("ID3", AudiobookStore(reopenedDatabase).observeChapters(bookId).first().single().source)
+        reopenedDatabase.close()
+        context.deleteDatabase(databaseName)
+    }
+
+    @Test
+    fun audiobookProgressRemainsIndependentAcrossBooksAndDatabaseRecreation() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val databaseName = "audiobook-progress-${UUID.randomUUID()}.db"
+        val longDurationMs = 237L * 60L * 60L * 1_000L
+        val firstBook = QueueItemEntity(
+            mediaId = "book-a",
+            uri = "content://test/audiobook/a",
+            title = "Book A",
+            contentType = "audiobook",
+            queueIndex = 0,
+        )
+        val secondBook = QueueItemEntity(
+            mediaId = "book-b",
+            uri = "content://test/audiobook/b",
+            title = "Book B",
+            contentType = "audiobook",
+            queueIndex = 1,
+        )
+
+        val firstDatabase = Room.databaseBuilder(context, PlaybackDatabase::class.java, databaseName).build()
+        val firstStore = PlaybackStore(firstDatabase)
+        firstStore.persistSnapshot(listOf(firstBook, secondBook), firstBook.mediaId, longDurationMs - 5_000L, longDurationMs)
+        firstStore.persistSnapshot(listOf(firstBook, secondBook), secondBook.mediaId, 45_000L, 90_000L)
+        firstDatabase.close()
+
+        val reopenedDatabase = Room.databaseBuilder(context, PlaybackDatabase::class.java, databaseName).build()
+        val reopenedStore = PlaybackStore(reopenedDatabase)
+        assertEquals(longDurationMs - 5_000L, reopenedStore.getProgress(firstBook.mediaId)?.positionMs)
+        assertEquals(longDurationMs, reopenedStore.getProgress(firstBook.mediaId)?.durationMs)
+        assertEquals(45_000L, reopenedStore.getProgress(secondBook.mediaId)?.positionMs)
+        reopenedDatabase.close()
+        context.deleteDatabase(databaseName)
+    }
+
     @Test
     fun changedReaderSourceResetsPositionAndInvalidatesCachedStructure() = runBlocking {
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
@@ -75,6 +136,12 @@ class PlaybackDatabaseTest {
                         db.execSQL(
                             "INSERT INTO reader_documents VALUES ('doc', 'content://test/doc', 'Book', 'text/plain', 1, 128)",
                         )
+                        db.execSQL(
+                            "CREATE TABLE audiobook_chapters (audiobookId TEXT NOT NULL, chapterIndex INTEGER NOT NULL, title TEXT NOT NULL, startMs INTEGER NOT NULL, endMs INTEGER, PRIMARY KEY(audiobookId, chapterIndex))",
+                        )
+                        db.execSQL(
+                            "INSERT INTO audiobook_chapters VALUES ('book', 0, 'Chapter 1', 0, 60000)",
+                        )
                     }
 
                     override fun onUpgrade(db: SupportSQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
@@ -87,16 +154,20 @@ class PlaybackDatabaseTest {
         val migrated = factory.create(
             SupportSQLiteOpenHelper.Configuration.builder(context)
                 .name(databaseName)
-                .callback(object : SupportSQLiteOpenHelper.Callback(14) {
+                .callback(object : SupportSQLiteOpenHelper.Callback(15) {
                     override fun onCreate(db: SupportSQLiteDatabase) = Unit
 
                     override fun onUpgrade(db: SupportSQLiteDatabase, oldVersion: Int, newVersion: Int) {
-                        if (oldVersion == 13 && newVersion == 14) PlaybackDatabase.MIGRATION_13_14.migrate(db)
+                        if (oldVersion == 13 && newVersion == 15) {
+                            PlaybackDatabase.MIGRATION_13_14.migrate(db)
+                            PlaybackDatabase.MIGRATION_14_15.migrate(db)
+                        }
                     }
                 })
                 .build(),
         )
-        val cursor = migrated.writableDatabase.query(
+        val database = migrated.writableDatabase
+        val cursor = database.query(
             "SELECT positionChars, positionFingerprint, positionAnchorVersion FROM reader_documents WHERE id = 'doc'",
         )
         cursor.use {
@@ -104,6 +175,10 @@ class PlaybackDatabaseTest {
             assertEquals(128L, it.getLong(0))
             assertEquals(true, it.isNull(1))
             assertEquals(1, it.getInt(2))
+        }
+        database.query("SELECT source FROM audiobook_chapters WHERE audiobookId = 'book'").use {
+            assertEquals(true, it.moveToFirst())
+            assertEquals("UNKNOWN", it.getString(0))
         }
         migrated.close()
         context.deleteDatabase(databaseName)
