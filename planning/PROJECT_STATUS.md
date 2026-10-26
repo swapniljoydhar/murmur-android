@@ -153,4 +153,4 @@ P5 exact-tree validation passed: `.\gradlew.bat test lintDebug assembleDebug ass
 
 This is not physical-device acceptance. TalkBack, touch-target measurement, contrast on real displays, large-font/layout behavior, notifications, API 26–current runtime behavior, OEM lifecycle, SAF provider behavior, and instrumentation execution remain in the deferred device gate. The dependency licensing document identifies direct dependency families but does not claim a complete transitive SBOM/legal audit. Neural TTS and full-book export remain deferred.
 
-P5 commit/push status will be updated after the remote operation completes.
+P5 implementation commit `924ac7a` (`chore(p5): harden backup and release documentation`) was pushed successfully to `origin/main`. The working tree should be checked after this status-only follow-up is committed.
