@@ -144,3 +144,13 @@ Validation on this exact source tree succeeded for `:app:assembleDebug`, `:app:t
 5. Update code documentation and this status doc only after evidence exists; add/fix tests when the behavior changes.
 6. Once feature work is complete, run the validation walkthrough, install/launch on the connected phone, and report exactly which scenarios passed and which were not run.
 7. Commit source separately from planning docs where practical; push the new commit to the existing private repository. Do not force-push again unless the current user explicitly requests rewriting an existing remote history.
+
+## P5 implementation update — 2026-10-27
+
+This is the latest P5 record; older snapshot sections above are historical. P5 removes an unused exact-alarm permission, explicitly excludes app-private data from Android cloud/device-transfer backup rules, cleans stale dependency catalog entries, and corrects README/architecture/storage/licensing scope. The app's in-app logical backup remains available and separately documented. No `INTERNET` permission was introduced.
+
+P5 exact-tree validation passed: `.\gradlew.bat test lintDebug assembleDebug assembleDebugAndroidTest assembleRelease` completed successfully. The unit reports contain 64 tests with zero failures/errors; lint reports zero errors, 41 warnings, and one hint. Debug and release merged manifests contain no `INTERNET`, `SCHEDULE_EXACT_ALARM`, or `POST_NOTIFICATIONS`; the release APK built unsigned, and instrumentation sources compiled but were not executed. The native strip warnings for `libandroidx.graphics.path.so` and `libdatastore_shared_counter.so` remain non-fatal.
+
+This is not physical-device acceptance. TalkBack, touch-target measurement, contrast on real displays, large-font/layout behavior, notifications, API 26–current runtime behavior, OEM lifecycle, SAF provider behavior, and instrumentation execution remain in the deferred device gate. The dependency licensing document identifies direct dependency families but does not claim a complete transitive SBOM/legal audit. Neural TTS and full-book export remain deferred.
+
+P5 commit/push status will be updated after the remote operation completes.

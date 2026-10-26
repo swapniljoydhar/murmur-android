@@ -240,3 +240,16 @@ Do not begin a broad architecture rewrite. For each slice, inspect adjacent code
 - [Sherpa-ONNX TTS model documentation](https://github.com/k2-fsa/sherpa-onnx/blob/master/c-api/docs/tts.dox)
 - [Piper upstream repository](https://github.com/rhasspy/piper)
 - [Android `PdfRenderer.Page` reference](https://developer.android.com/reference/android/graphics/pdf/PdfRenderer.Page)
+
+## P5 implementation update — 2026-10-27
+
+- Removed the unused `SCHEDULE_EXACT_ALARM` permission. Kept required media/foreground-service permissions and did not add `INTERNET` or notification permission.
+- Replaced broad OS backup includes with explicit exclusions for app data in both Android 11-and-lower full backup rules and Android 12+ cloud/device-transfer rules. This matters because Android documents that `allowBackup=false` can still permit device-to-device transfer on some OEMs. Murmur's user-triggered, validated logical backup remains separate.
+- Removed stale, unreferenced Compose icon version pins so the Compose BOM selects the versions consistently; removed unused Wear Glance and neural TTS catalog declarations. Existing pinned toolchain/dependency versions were not broadly upgraded based on lint's newer-version hints.
+- Corrected README, architecture, storage, and dependency-license documentation to distinguish implemented app paths from deferred/unverified behavior. The licensing note is a dependency-family review, not a full transitive SBOM/legal audit.
+- Static lint and source review cover common accessibility, manifest, and dependency issues, but do not substitute for TalkBack, large-font, landscape/tablet, API-matrix, notification, or OEM-device acceptance. Those physical-device checks remain deferred until all P0–P5 implementation is complete, per the user's sequencing instruction.
+- Neural TTS was not added or benchmarked; full-book speech export remains deferred. No new optional feature was introduced.
+- Exact-tree validation passed on this tree: `.\gradlew.bat test lintDebug assembleDebug assembleDebugAndroidTest assembleRelease` completed successfully. Unit report totals 64 tests, 0 failures/errors; lint reports 0 errors, 41 warnings and 1 hint. Debug and release merged manifests contain no `INTERNET`, `SCHEDULE_EXACT_ALARM`, or `POST_NOTIFICATIONS`; merged dependencies add `WAKE_LOCK`, `ACCESS_NETWORK_STATE`, `RECEIVE_BOOT_COMPLETED`, and AndroidX's dynamic receiver permission. The release APK built unsigned; instrumentation APK compiled but device instrumentation did not run.
+- The native symbol-strip warnings for `libandroidx.graphics.path.so` and `libdatastore_shared_counter.so` remain non-fatal and unchanged. Newer-version lint hints were not used as a reason to upgrade the pinned dependency/toolchain set.
+- Static lint does not constitute TalkBack, touch-target measurement, contrast measurement, large-font/landscape/tablet, API-level, notification, OEM, or SAF-provider device acceptance. Do not call device acceptance complete based on build or instrumentation-APK compilation.
+- P5 source/config and documentation changes are ready for commit. The push result must be recorded after the remote operation completes.

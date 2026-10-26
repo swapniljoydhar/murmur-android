@@ -54,8 +54,8 @@ dependencies {
     implementation(libs.androidx.documentfile)
 
     // Material Icons
-    implementation("androidx.compose.material:material-icons-core:1.7.0")
-    implementation("androidx.compose.material:material-icons-extended:1.7.0")
+    implementation(libs.androidx.compose.material.icons.core)
+    implementation(libs.androidx.compose.material.icons.extended)
 
     // Room is ready for feature-owned entities and DAOs; no empty schema is created.
     implementation(libs.androidx.room.runtime)
@@ -67,9 +67,6 @@ dependencies {
 
     // Glance for the now-playing home screen widget
     implementation(libs.androidx.glance.appwidget)
-
-    // Sherpa-ONNX for neural TTS (AAR not on Maven Central - add local AAR when available)
-    // implementation(libs.sherpa.onnx)
 
     debugImplementation(libs.androidx.compose.ui.tooling)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
