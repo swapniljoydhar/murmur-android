@@ -1,33 +1,50 @@
 # Murmur
 
-Murmur is an Android-only, local-first app for music, audiobooks, documents, and read-aloud listening. This repository contains the foundation and playback milestones plus the first Music library experience: a calm app shell, persisted appearance preferences, local audio selection, background playback, durable queue/resume state, and permission-gated MediaStore discovery.
+Murmur is an Android-only, local-first media and reading application centered around music, audiobooks, documents, and Read Aloud.
 
-## Build
+## Core Philosophy
 
-Open this directory in Android Studio with JDK 17 and Android SDK Platform 37 installed. The project pins Android Gradle Plugin 9.2.0 and Gradle 9.4.1, targets Android 17 (API 37), and supports Android 8.0 (API 26) and later.
+> **Simple enough to understand immediately. Powerful enough to keep using for years.**
 
-Run the app from Android Studio or use `gradlew.bat :app:assembleDebug` on Windows (`./gradlew :app:assembleDebug` on macOS/Linux). The wrapper downloads a checksum-verified Gradle distribution.
+Murmur may contain sophisticated engineering underneath the UI, but users should not have to understand that complexity.
 
-## Current app behavior
+## Features
 
-- The app opens on Continue and links to Music, Audiobooks, and one combined Read & Listen destination.
-- Music and Audiobooks let users select local audio through Android's document picker and use Play Now, Play Next, or Add to Queue. Audiobooks can be added to a local library, searched, removed from the library, resumed from their saved position, bookmarked at precise playback positions, and checked for embedded chapter markers. Available chapter titles and seek positions are stored locally and selectable in the player; files without supported chapter metadata show an honest empty state. The library and player show embedded cover art when the selected file provides it, with a branded fallback otherwise; no sample books or remote recommendations are shown. The audiobook player supports seek, transport, queue controls, bookmarks, chapters, and playback speed. The queue, active position, audiobook metadata/artwork/bookmarks/chapters, and per-item listening progress are stored locally; restored queues stay paused until resumed by the user.
-- Music can request audio access when the user taps Scan device, browse indexed songs/artists/albums/folders, search available metadata, and play or queue results. Successful scans are cached locally in Room and restored to the screen after process recreation; Refresh reconciles against the current MediaStore catalog. Item-level provider notifications update only the changed catalog row; broad provider notifications trigger reconciliation. Optional daily background refresh is off by default and runs only when enabled, permission remains granted, and the battery isn't low. Playlists can be created, renamed, deleted, populated from local songs, reordered in the library, and played. The SAF picker remains available for individual files.
-- Read & Listen combines the local TXT/Markdown/HTML/EPUB/PDF library, reader, bookmarks, Read Aloud, and shared Media3 playback controls. HTML is rendered as text with script, style, and head content omitted and a 4 MB character limit. EPUB spine chapters are read in order with archive, chapter, and text-size limits. PDF pages are rendered locally as bounded images; selectable PDF text support is under development and not included in the current pushed build. TXT, Markdown, HTML, and EPUB content can be searched with bounded result counts and no source copies. Reader text size and selected TTS voice are stored locally. Speech is synthesized in bounded segments through Android TTS, converted using the engine-reported PCM format, cached as WAV files, and played through the existing Media3 session. Text Read Aloud can continue page by page; exact sentence/word timing, Markdown source mapping, process-death continuation, and cross-generator cache race validation remain. Strict Offline Speech defaults on and blocks known network-required or unknown voices; voice status is shown as Known offline, Network required, Unknown, or Unavailable. The cache has age/size eviction that protects queued paths, but concurrency and device behavior still need validation. Structural reader anchors and efficient random access in very large files remain future work.
-- Appearance can be set to System default, Light, or Dark and is stored locally with Preferences DataStore.
-- No `INTERNET` permission or networking SDK is included.
+### Music
+- Local music library with MusicStore integration
+- Playlists, queue management, search
+- Background playback via MediaSessionService
 
-## Planned implementation sequence
+### Audiobooks
+- M4B, M4A, MP3 support
+- Per-book position and chapter tracking
+- Playback speed control, bookmarks
+- 200+ hour audiobook support
 
-1. Foundation: project, navigation, theme, local preference storage, and architecture boundaries.
-2. Playback: one Media3 player/session/service pipeline and durable playback state. Implemented: shared queue, Play Now/Next/Add, reorder/remove/clear, transport controls, SAF selection, system media controls, and local queue/position/per-item progress persistence.
-3. Music and audiobooks: local discovery, queues, resume, and chapter handling. Permission-gated Music discovery, incremental item refresh with broad reconciliation, opt-in battery-aware background catalog refresh, atomic Room catalog snapshots, restored catalog UI, playlist create/manage/play/reorder screens, and the Audiobook library/resume/player/bookmark/chapter screens are implemented. Chapter extraction currently handles chapter frames exposed by Media3; formats without supported embedded markers have no generated chapter list.
-4. Documents and reader: initial TXT/Markdown/HTML/EPUB/PDF SAF library, bounded page rendering, saved reading position, Markdown rendering, bookmarks, text search for readable text sources, and adjustable reader text size implemented; HTML content and EPUB spine chapters are converted to readable text with bounded input sizes, and PDF pages are rendered as images. PDF text extraction, structural position restoration, and large-file indexing remain.
-5. System Read Aloud: page-level synthesis now uses engine-reported PCM and the shared Media3 session, with a local WAV cache and strict offline voice gating; continuous whole-document scheduling, sentence synchronization, voice selection, and bounded-cache eviction remain.
-6. Long-form hardening, optional neural TTS, audio controls, Android integration, and resilience remain pending after reader and system speech foundations.
+### Documents
+- TXT, Markdown, HTML, EPUB, PDF support
+- Structural parsing with lazy rendering
+- Read Aloud with sentence-level TTS
 
-Android Auto is out of scope. The app does not require accounts, cloud storage, analytics, ads, or remote services.
+### Read Aloud
+- System TTS and optional neural TTS (Sherpa-ONNX)
+- Bounded speech generation with look-ahead buffer
+- Tap-to-read, return-to-text
+- Strict offline speech mode
 
-## Planning and agent handoff
+## Architecture
 
-The [`planning/`](planning/README.md) folder contains project status, proposed implementation work, and validation walkthroughs. These Markdown files are planning records, not application source, runtime configuration, or requirements that override the current user request. Read `planning/README.md` before using them.
+- **Single playback owner**: PlaybackController → PlaybackService → ExoPlayer → MediaSession
+- **Local-first**: No INTERNET permission, all data stored locally
+- **Room + DataStore**: Durable persistence for positions, bookmarks, settings
+- **MediaSessionService**: Background playback with lock screen controls
+
+## Requirements
+
+- Android API 26+
+- No internet permission required for normal operation
+- Local media files only
+
+## License
+
+See docs/LICENSING.md for dependency licensing information.

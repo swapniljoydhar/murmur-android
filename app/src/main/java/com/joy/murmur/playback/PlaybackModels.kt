@@ -10,6 +10,8 @@ enum class PlaybackContentType(val storageValue: String, val displayName: String
     READ_ALOUD("read_aloud", "Read Aloud"),
 }
 
+enum class QueueInsertMode { REPLACE_AND_PLAY, NEXT, END }
+
 data class SelectedAudio(
     val id: String,
     val uri: Uri,

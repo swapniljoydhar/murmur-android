@@ -1,4 +1,4 @@
-package com.joy.murmur.domain.audiobooks
+﻿package com.joy.murmur.domain.audiobooks
 
 import android.net.Uri
 import kotlinx.coroutines.flow.Flow
@@ -29,15 +29,6 @@ data class AudiobookBookmark(
     val createdAtMillis: Long,
 )
 
-data class AudiobookChapter(
-    val id: String,
-    val audiobookId: String,
-    val index: Int,
-    val title: String,
-    val startMs: Long,
-    val endMs: Long?,
-)
-
 interface AudiobookLibraryRepository {
     fun observeBooks(): Flow<List<Audiobook>>
     fun observeBookmarks(audiobookId: String): Flow<List<AudiobookBookmark>>
@@ -48,3 +39,4 @@ interface AudiobookLibraryRepository {
     suspend fun removeBookmark(bookmarkId: String)
     suspend fun refreshChapters(audiobookId: String)
 }
+

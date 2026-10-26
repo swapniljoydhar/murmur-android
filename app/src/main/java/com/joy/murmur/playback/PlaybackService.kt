@@ -1,24 +1,39 @@
-package com.joy.murmur.playback
+﻿package com.joy.murmur.playback
 
+import android.content.Intent
 import android.os.Process
 import android.net.Uri
+import androidx.annotation.OptIn
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
+import androidx.media3.common.audio.AudioProcessor
+import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
+import com.joy.murmur.playback.BalanceProcessor
+import com.joy.murmur.playback.CrossfeedProcessor
+import com.joy.murmur.playback.DitherProcessor
+import com.joy.murmur.playback.EqualizerProcessor
+import com.joy.murmur.playback.HeadroomLimiterProcessor
+import com.joy.murmur.playback.ReplayGainProcessor
 import com.joy.murmur.data.playback.PlaybackDatabase
 import com.joy.murmur.data.playback.PlaybackStore
 import com.joy.murmur.data.playback.QueueItemEntity
 import com.joy.murmur.data.playback.ReaderDocumentStore
 import com.joy.murmur.data.documents.RoomDocumentLibraryRepository
 import com.joy.murmur.data.speech.SystemTtsSpeechGenerator
+import com.joy.murmur.data.speech.SpeechSegmentResult
+import com.joy.murmur.data.speech.SynthesisIdentity
 import com.joy.murmur.data.settings.DataStoreSettingsRepository
 import com.joy.murmur.data.settings.settingsDataStore
 import com.joy.murmur.domain.documents.ReaderDocument
+import com.joy.murmur.widget.WidgetManager
+import com.joy.murmur.widget.WidgetActionReceiver
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
@@ -29,6 +44,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
+@OptIn(UnstableApi::class)
 class PlaybackService : MediaSessionService() {
     private data class PlayerSnapshot(
         val queue: List<QueueItemEntity>,
@@ -41,24 +57,58 @@ class PlaybackService : MediaSessionService() {
     private val persistenceMutex = Mutex()
     private lateinit var player: ExoPlayer
     private lateinit var store: PlaybackStore
+    private lateinit var replayGainProcessor: ReplayGainProcessor
+    private lateinit var equalizerProcessor: EqualizerProcessor
+    private lateinit var crossfeedProcessor: CrossfeedProcessor
+    private lateinit var headroomLimiterProcessor: HeadroomLimiterProcessor
+    private lateinit var balanceProcessor: BalanceProcessor
+    private lateinit var ditherProcessor: DitherProcessor
     private var mediaSession: MediaSession? = null
     private var restorationComplete = false
-    private var continuationJob: kotlinx.coroutines.Job? = null
+    private var continuationJob: Job? = null
+    private val processors = mutableListOf<MurmurAudioProcessor>()
+
+    // Single shared TTS generator instance
+    private var ttsGenerator: SystemTtsSpeechGenerator? = null
 
     override fun onCreate() {
         super.onCreate()
         store = PlaybackStore(PlaybackDatabase.getInstance(this))
-        player = ExoPlayer.Builder(this).build()
+
+        replayGainProcessor = ReplayGainProcessor()
+        equalizerProcessor = EqualizerProcessor()
+        crossfeedProcessor = CrossfeedProcessor()
+        headroomLimiterProcessor = HeadroomLimiterProcessor()
+        balanceProcessor = BalanceProcessor()
+        ditherProcessor = DitherProcessor()
+        processors.addAll(listOf(
+            replayGainProcessor, equalizerProcessor, crossfeedProcessor,
+            headroomLimiterProcessor, balanceProcessor, ditherProcessor
+        ))
+
+        player = ExoPlayer.Builder(this)
+            .build()
         player.setAudioAttributes(
             androidx.media3.common.AudioAttributes.DEFAULT,
             true,
         )
         player.addListener(object : Player.Listener {
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-                val segment = mediaItem?.let { parseReadAloudMediaId(it.mediaId) } ?: return
-                serviceScope.launch(Dispatchers.IO) {
-                    runCatching { ReaderDocumentStore(PlaybackDatabase.getInstance(this@PlaybackService)).savePosition(segment.documentId, segment.pageStart + segment.sourceOffset) }
+                val mediaId = mediaItem?.mediaId ?: return
+                if (mediaId.startsWith("read_aloud_start")) {
+                    serviceScope.launch(Dispatchers.IO) {
+                        runCatching { startReadAloud(mediaId) }
+                    }
+                    return
                 }
+                val segment = parseReadAloudMediaId(mediaId) ?: return
+                serviceScope.launch(Dispatchers.IO) {
+                    runCatching {
+                        ReaderDocumentStore(PlaybackDatabase.getInstance(this@PlaybackService))
+                            .savePosition(segment.documentId, segment.pageStart + segment.sourceOffset)
+                    }
+                }
+                updateReplayGainForCurrentTrack()
             }
 
             override fun onPlaybackStateChanged(playbackState: Int) {
@@ -74,32 +124,84 @@ class PlaybackService : MediaSessionService() {
                 if (restorationComplete) serviceScope.launch { persistPlayerState() }
             }
         })
+
         mediaSession = MediaSession.Builder(this, player)
             .setCallback(LocalControllerCallback())
             .build()
-        val savedPlayback = runBlocking(Dispatchers.IO) { store.queue() to store.state() }
-        restoreQueue(savedPlayback.first, savedPlayback.second)
-        restorationComplete = true
-        serviceScope.launch {
-            while (true) {
-                delay(5_000L)
-                persistPlayerState()
+
+        serviceScope.launch(Dispatchers.IO) {
+            val savedPlayback = store.queue() to store.state()
+            withContext(Dispatchers.Main.immediate) {
+                restoreQueue(savedPlayback.first, savedPlayback.second)
+                restorationComplete = true
+                // Check if we need to restore Read Aloud state
+                maybeRestoreReadAloudState()
             }
         }
+
+        serviceScope.launch {
+            delay(1000L)
+            while (true) {
+                delay(5_000L)
+                if (restorationComplete) persistPlayerState()
+            }
+        }
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        intent?.getStringExtra("widget_action")?.let { action ->
+            when (action) {
+                "play" -> if (!player.isPlaying) player.play()
+                "pause" -> if (player.isPlaying) player.pause()
+                "next" -> player.seekToNextMediaItem()
+                "previous" -> player.seekToPreviousMediaItem()
+            }
+            WidgetManager.updateAllWidgets(this)
+        }
+        return super.onStartCommand(intent, flags, startId)
+    }
+
+    private fun updateReplayGainForCurrentTrack() {
+        // ReplayGain metadata reading requires custom implementation
     }
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = mediaSession
 
     override fun onDestroy() {
+        // Cancel all jobs first
+        continuationJob?.cancel()
+        continuationJob = null
+
+        // Persist final state synchronously
         val savedState = snapshotPlayerState()
         runBlocking(Dispatchers.IO) { persistSnapshot(savedState) }
+
+        // Release media session and player
         mediaSession?.run {
             player.release()
             release()
         }
         mediaSession = null
+
+        // Release audio processors (if they have a release method)
+        processors.forEach {
+            if (it is AutoCloseable) {
+                try { it.close() } catch (_: Exception) {}
+            }
+        }
+        processors.clear()
+
+        // Shutdown shared TTS generator
+        ttsGenerator?.shutdown()
+        ttsGenerator = null
+
         serviceScope.cancel()
         super.onDestroy()
+    }
+
+    // Get or create the shared TTS generator instance
+    private fun getTtsGenerator(): SystemTtsSpeechGenerator {
+        return ttsGenerator ?: SystemTtsSpeechGenerator(this@PlaybackService).also { ttsGenerator = it }
     }
 
     private fun restoreQueue(queue: List<QueueItemEntity>, saved: com.joy.murmur.data.playback.PlaybackStateEntity?) {
@@ -145,6 +247,28 @@ class PlaybackService : MediaSessionService() {
         durationMs = snapshot.durationMs,
     )
 
+    /**
+     * Checks if the current queue has Read Aloud items and attempts to restore
+     * the TTS generation state if the process was interrupted during synthesis.
+     */
+    private fun maybeRestoreReadAloudState() {
+        val currentMediaId = player.currentMediaItem?.mediaId
+        val segment = currentMediaId?.let { parseReadAloudMediaId(it) }
+        
+        if (segment != null && segment.continuous) {
+            // Check if we're near the end of the queue (TTS might have been generating)
+            val currentIndex = player.currentMediaItemIndex
+            val itemsRemaining = player.mediaItemCount - currentIndex - 1
+            
+            // If we have few items left, we might have been interrupted during generation
+            if (itemsRemaining <= 2) {
+                serviceScope.launch(Dispatchers.IO) {
+                    runCatching { continueReadAloud(segment, player.currentMediaItem!!) }
+                }
+            }
+        }
+    }
+
     private suspend fun continueReadAloud(segment: ReadAloudSegmentInfo, endedItem: MediaItem) {
         val nextStart = segment.pageStart + segment.pageLength
         runCatching {
@@ -155,23 +279,50 @@ class PlaybackService : MediaSessionService() {
             val sourcePage = repository.readPage(document, nextStart, READ_ALOUD_PAGE_SIZE)
             if (sourcePage.isBlank() || player.currentMediaItem?.mediaId != endedItem.mediaId) return
             val settings = DataStoreSettingsRepository(applicationContext.settingsDataStore)
-            val selectedVoice = settings.selectedSpeechVoice.first()
+            val selectedVoice = settings.selectedSpeechVoice.first() ?: ""
             val strictOffline = settings.strictOfflineSpeech.first()
-            val generator = SystemTtsSpeechGenerator(this@PlaybackService)
+            
+            // Get document structure for sentence segmentation
+            val docStructure = try {
+                repository.getDocumentStructure(document.id)
+            } catch (e: Exception) {
+                null
+            }
+
+            val generator = getTtsGenerator()
             try {
                 generator.selectVoice(selectedVoice)
-                val speechText = if (document.mimeType == "text/markdown") markdownForSpeech(sourcePage) else sourcePage
+                val speechText = if (document.mimeType == "text/markdown") ReadAloudUtils.markdownForSpeech(sourcePage) else sourcePage
+                val identity = SynthesisIdentity(
+                    engine = "android_tts",
+                    engineVersion = "1",
+                    voice = selectedVoice,
+                    locale = document.mimeType,
+                    pronunciationVersion = "1",
+                    filterVersion = "1",
+                    sampleRate = 0, // Will be filled by engine
+                    channelCount = 0,
+                    bitDepth = 0,
+                )
                 val generated = generator.synthesize(
                     text = speechText,
-                    identity = "${document.id}:$nextStart:${document.mimeType}",
+                    identity = identity,
                     strictOffline = strictOffline,
+                    documentStructure = docStructure,
                 )
                 if (player.currentMediaItem?.mediaId != endedItem.mediaId || generated.isEmpty()) return
-                val mediaItems = generated.map { file ->
-                    val absoluteOffset = nextStart + file.sourceOffset
+                val mediaItems = generated.map { segment ->
+                    val absoluteOffset = nextStart + segment.sourceOffset
                     MediaItem.Builder()
-                        .setMediaId(readAloudMediaId(document.id, nextStart, sourcePage.length, true, file.sourceOffset.toLong(), file.file.nameWithoutExtension))
-                        .setUri(Uri.fromFile(file.file))
+                        .setMediaId(ReadAloudUtils.readAloudMediaId(
+                            document.id,
+                            nextStart,
+                            sourcePage.length,
+                            true,
+                            segment.sourceOffset.toLong(),
+                            segment.file.nameWithoutExtension,
+                        ))
+                        .setUri(Uri.fromFile(segment.file))
                         .setMediaMetadata(
                             MediaMetadata.Builder()
                                 .setTitle(document.title)
@@ -189,8 +340,90 @@ class PlaybackService : MediaSessionService() {
                 player.seekTo(nextIndex, 0L)
                 player.prepare()
                 player.play()
-            } finally {
-                generator.shutdown()
+            } catch (e: Exception) {
+                // Generator shutdown is handled by onDestroy
+                throw e
+            }
+        }
+    }
+
+
+    private suspend fun startReadAloud(mediaId: String) {
+        val fields = mediaId.split('|')
+        if (fields.size < 6 || fields[0] != "read_aloud_start") return
+        val documentId = Uri.decode(fields[1])
+        val startChar = fields[2].toLongOrNull() ?: return
+        val mimeType = fields[3]
+        val strictOffline = fields[4] == "true"
+        val continuous = fields[5] == "continuous"
+
+        runCatching {
+            val documentsStore = ReaderDocumentStore(PlaybackDatabase.getInstance(this@PlaybackService))
+            val row = documentsStore.getDocument(documentId) ?: return
+            val document = ReaderDocument(row.id, Uri.parse(row.uri), row.title, row.mimeType, row.addedAtMillis, row.positionChars)
+            val repository = RoomDocumentLibraryRepository(this@PlaybackService, documentsStore)
+            val sourcePage = repository.readPage(document, startChar, READ_ALOUD_PAGE_SIZE)
+            if (sourcePage.isBlank() || player.currentMediaItem?.mediaId != mediaId) return
+val settings = DataStoreSettingsRepository(applicationContext.settingsDataStore)
+            val selectedVoice = settings.selectedSpeechVoice.first() ?: ""
+            
+            // Get document structure for sentence segmentation
+            val docStructure = try {
+                repository.getDocumentStructure(document.id)
+            } catch (e: Exception) {
+                null
+            }
+
+            val generator = getTtsGenerator()
+            try {
+                generator.selectVoice(selectedVoice)
+                val speechText = if (document.mimeType == "text/markdown") ReadAloudUtils.markdownForSpeech(sourcePage) else sourcePage
+                val identity = SynthesisIdentity(
+                    engine = "android_tts",
+                    engineVersion = "1",
+                    voice = selectedVoice,
+                    locale = mimeType,
+                    pronunciationVersion = "1",
+                    filterVersion = "1",
+                    sampleRate = 0,
+                    channelCount = 0,
+                    bitDepth = 0,
+                )
+                val generated = generator.synthesize(
+                    text = speechText,
+                    identity = identity,
+                    strictOffline = strictOffline,
+                    documentStructure = docStructure,
+                )
+                if (player.currentMediaItem?.mediaId != mediaId || generated.isEmpty()) return
+                val mediaItems = generated.map { segment ->
+                    MediaItem.Builder()
+                        .setMediaId(ReadAloudUtils.readAloudMediaId(
+                            document.id,
+                            startChar,
+                            sourcePage.length,
+                            continuous,
+                            segment.sourceOffset.toLong(),
+                            segment.file.nameWithoutExtension,
+                        ))
+                        .setUri(Uri.fromFile(segment.file))
+                        .setMediaMetadata(
+                            MediaMetadata.Builder()
+                                .setTitle(document.title)
+                                .setArtist("Read Aloud")
+                                .setAlbumTitle("Read Aloud")
+                                .setGenre("read_aloud")
+                                .build(),
+                        )
+                        .build()
+                }
+                if (player.currentMediaItem?.mediaId != mediaId) return
+                documentsStore.savePosition(document.id, startChar)
+                player.setMediaItems(mediaItems, 0, 0L)
+                player.prepare()
+                player.play()
+            } catch (e: Exception) {
+                throw e
             }
         }
     }
@@ -219,7 +452,13 @@ class PlaybackService : MediaSessionService() {
         ): MediaSession.ConnectionResult {
             val sameApp = controller.uid == applicationInfo.uid
             val system = controller.uid == Process.SYSTEM_UID
-            return if (sameApp || system) {
+            val isBluetooth = controller.packageName?.let { pkg ->
+                pkg == "com.android.bluetooth" || pkg.contains("bluetooth", ignoreCase = true)
+            } == true
+            val isWear = controller.packageName?.contains("wear", ignoreCase = true) == true
+            val isAuto = controller.packageName?.contains("auto", ignoreCase = true) == true
+
+            return if (sameApp || system || isBluetooth || isWear || isAuto) {
                 MediaSession.ConnectionResult.AcceptedResultBuilder(session, controller).build()
             } else {
                 MediaSession.ConnectionResult.reject()

@@ -1,0 +1,26 @@
+
+{
+  "$schema": "https://app.kilo.ai/config.json",
+  "skills": [
+    "reverse-engineer-anything",
+    "rea-analysis-optimization",
+    "rea-changelog-update",
+    "rea-ci-tests-audit",
+    "rea-tool-design"
+  ],
+  "mcp": {
+    "rea": {
+      "type": "local",
+      "command": [
+        "cmd",
+        "/c",
+        "npx",
+        "-y",
+        "rea-agents@latest",
+        "mcp"
+      ],
+      "enabled": true,
+      "timeout": 15000
+    }
+  }
+}

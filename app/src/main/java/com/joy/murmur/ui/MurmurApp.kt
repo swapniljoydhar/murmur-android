@@ -8,6 +8,7 @@ import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
 import android.os.Build
 import android.provider.OpenableColumns
+import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
@@ -102,12 +103,42 @@ import com.joy.murmur.playback.SelectedAudio
 import com.joy.murmur.playback.readAloudMediaId
 import com.joy.murmur.playback.markdownForSpeech
 import com.joy.murmur.playback.toStableMediaId
+import com.joy.murmur.playback.BackgroundPlaybackHealth
+import com.joy.murmur.playback.OemDiagnosticState
+import com.joy.murmur.playback.OemCompatibility
 import com.joy.murmur.ui.theme.MurmurTheme
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.debounce
+
+private fun createTtsSettingsIntent(): Intent {
+    val intent = Intent("com.android.settings.TTS_SETTINGS")
+    intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+    return intent
+}
+
+private enum class Destination(val route: String, val title: String, val description: String) {
+    Continue("continue", "Continue", "Pick up with local listening and reading"),
+    Music("music", "Music", "Browse music on this device"),
+    Audiobooks("audiobooks", "Audiobooks", "Keep your place in every book"),
+    Documents("documents", "Read & Listen", "Read documents and listen aloud in one place"),
+    ReadAloud("read-aloud", "Read Aloud", "Listen to a document"),
+    Settings("settings", "Settings", "Appearance and app preferences"),
+    VoiceSettings("settings/voice", "Voice", "Read Aloud voice settings"),
+    OemFix("oem-fix", "Fix Background Playback", "Resolve background playback restrictions"),
+    NowPlaying("now-playing", "Now Playing", "Playback controls and queue");
+
+    companion object {
+        fun fromRoute(route: String): Destination? = entries.firstOrNull { it.route == route }
+    }
+}
+
+private enum class SettingsTab(val label: String) {
+    APPEARANCE("Appearance"),
+    VOICE("Read Aloud Voice"),
+}
 
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
@@ -226,7 +257,35 @@ private fun MurmurNavigation(
             ReaderScreen(entry.arguments?.getString("documentId").orEmpty(), documentLibraryRepository, playbackController, settingsRepository)
         }
         composable(Destination.Settings.route) {
-            AppearanceSettingsScreen(appearanceMode, settingsRepository::setAppearanceMode)
+            SettingsScreen(settingsRepository)
+        }
+        composable(Destination.OemFix.route) {
+            val fixLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { _ ->
+                navController.popBackStack()
+            }
+            val diagnostic = OemCompatibility(LocalContext.current).diagnosticState.collectAsState(initial = OemDiagnosticState(
+                health = BackgroundPlaybackHealth.UNKNOWN,
+                manufacturer = Build.MANUFACTURER,
+                model = Build.MODEL,
+                androidVersion = Build.VERSION.SDK_INT,
+                oemSkin = null,
+                isBatteryOptimizationEnabled = false,
+                isPowerSaverActive = false,
+                isAppRestricted = false,
+                isForegroundServiceActive = false,
+                mediaSessionState = 0,
+                playerState = 0,
+                notificationState = false,
+                recentInterruption = false,
+            ))
+            OemFixScreen(
+                diagnostic = diagnostic.value,
+                oemCompatibility = OemCompatibility(LocalContext.current),
+                onDismiss = { navController.popBackStack() },
+                onOpenSettings = { intent ->
+                    fixLauncher.launch(intent)
+                },
+            )
         }
         composable(Destination.NowPlaying.route) {
             NowPlayingScreen(playback, playbackController, audiobookLibraryRepository) {
@@ -889,9 +948,10 @@ private fun ReaderScreen(
             speechError = null
             try {
                 val spokenText = if (currentDocument.mimeType == "text/markdown") markdownForSpeech(page) else page
+                val identity = speechGenerator.currentIdentity()
                 val generated = speechGenerator.synthesize(
                     text = spokenText,
-                    identity = "${currentDocument.id}:$pageStart:${currentDocument.mimeType}",
+                    identity = identity,
                     strictOffline = strictOffline,
                 )
                 val items = generated.map { segment ->
@@ -1213,6 +1273,7 @@ private val VoiceNetworkRequirement.label: String
         VoiceNetworkRequirement.NETWORK_REQUIRED -> "Network required"
         VoiceNetworkRequirement.UNKNOWN -> "Unknown"
         VoiceNetworkRequirement.UNAVAILABLE -> "Unavailable"
+        VoiceNetworkRequirement.MISSING_DATA -> "Missing data"
     }
 
 @Composable
@@ -1793,17 +1854,230 @@ private fun queryDisplayName(resolver: ContentResolver, uri: Uri): String {
     return uri.lastPathSegment?.substringAfterLast('/')?.takeIf(String::isNotBlank) ?: "Audio file"
 }
 
-private enum class Destination(val route: String, val title: String, val description: String) {
-    Continue("continue", "Continue", "Pick up with local listening and reading"),
-    Music("music", "Music", "Browse music on this device"),
-    Audiobooks("audiobooks", "Audiobooks", "Keep your place in every book"),
-    Documents("documents", "Read & Listen", "Read documents and listen aloud in one place"),
-    ReadAloud("read-aloud", "Read Aloud", "Listen to a document"),
-    Settings("settings", "Settings", "Appearance and app preferences"),
-    NowPlaying("now-playing", "Now Playing", "Playback controls and queue");
+@Composable
+private fun SettingsScreen(settingsRepository: SettingsRepository) {
+    val appearanceMode by settingsRepository.appearanceMode.collectAsState(initial = AppearanceMode.SYSTEM)
+    val scope = rememberCoroutineScope()
+    var selectedTab by remember { mutableStateOf(SettingsTab.APPEARANCE) }
 
-    companion object {
-        fun fromRoute(route: String): Destination? = entries.firstOrNull { it.route == route }
+    Column(Modifier.fillMaxSize()) {
+        SecondaryTabRow(
+            selectedTabIndex = selectedTab.ordinal,
+            modifier = Modifier.fillMaxWidth(),
+            contentColor = MaterialTheme.colorScheme.onSurface,
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+        ) {
+            SettingsTab.entries.forEach { tab ->
+                Tab(
+                    selected = selectedTab == tab,
+                    onClick = { selectedTab = tab },
+                    text = { Text(tab.label) },
+                )
+            }
+        }
+        androidx.compose.foundation.layout.Box(Modifier.fillMaxSize().padding(horizontal = 24.dp, vertical = 16.dp)) {
+            when (selectedTab) {
+                SettingsTab.APPEARANCE -> AppearanceSettingsContent(appearanceMode) { mode ->
+                    scope.launch { settingsRepository.setAppearanceMode(mode) }
+                }
+                SettingsTab.VOICE -> VoiceSettingsContent(settingsRepository)
+            }
+        }
+    }
+}
+
+@Composable
+private fun AppearanceSettingsContent(
+    selectedMode: AppearanceMode,
+    onModeSelected: suspend (AppearanceMode) -> Unit,
+) {
+    val scope = rememberCoroutineScope()
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 24.dp, vertical = 28.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        Text("Appearance", style = MaterialTheme.typography.headlineSmall)
+        Text("Choose how Murmur looks on this device.", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        AppearanceMode.entries.forEach { mode ->
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                RadioButton(selected = selectedMode == mode, onClick = { scope.launch { onModeSelected(mode) } })
+                Text(mode.label, Modifier.padding(start = 8.dp), style = MaterialTheme.typography.bodyLarge)
+            }
+        }
+    }
+}
+
+@Composable
+private fun VoiceSettingsContent(settingsRepository: SettingsRepository) {
+    val scope = rememberCoroutineScope()
+    val strictOffline by settingsRepository.strictOfflineSpeech.collectAsState(initial = true)
+    val selectedVoice by settingsRepository.selectedSpeechVoice.collectAsState(initial = null)
+    var availableVoices by remember { mutableStateOf<List<SpeechVoiceOption>>(emptyList()) }
+    var voiceEligibility by remember { mutableStateOf<VoiceNetworkRequirement>(VoiceNetworkRequirement.UNKNOWN) }
+    var checking by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var launchTtsSettings by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+
+    LaunchedEffect(launchTtsSettings) {
+        if (launchTtsSettings) {
+            val intent = createTtsSettingsIntent()
+            context.startActivity(intent)
+            launchTtsSettings = false
+        }
+    }
+
+    fun refreshVoices() {
+        scope.launch {
+            checking = true
+            error = null
+            try {
+                availableVoices = settingsRepository.getAvailableVoices()
+                if (selectedVoice != null) {
+                    voiceEligibility = settingsRepository.checkVoiceEligibility(selectedVoice)
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (e: Exception) {
+                error = "Could not load voices: ${e.message}"
+            } finally {
+                checking = false
+            }
+        }
+    }
+
+    LaunchedEffect(Unit) { refreshVoices() }
+    LaunchedEffect(strictOffline) { refreshVoices() }
+
+    @Composable
+    fun voiceStatusIcon(requirement: VoiceNetworkRequirement): String = when (requirement) {
+        VoiceNetworkRequirement.KNOWN_OFFLINE -> "✓"
+        VoiceNetworkRequirement.NETWORK_REQUIRED -> "⚠"
+        VoiceNetworkRequirement.MISSING_DATA -> "⚠"
+        VoiceNetworkRequirement.UNAVAILABLE -> "✗"
+        else -> "?"
+    }
+
+    @Composable
+    fun voiceStatusColor(requirement: VoiceNetworkRequirement) = when (requirement) {
+        VoiceNetworkRequirement.KNOWN_OFFLINE -> MaterialTheme.colorScheme.tertiary
+        VoiceNetworkRequirement.NETWORK_REQUIRED -> MaterialTheme.colorScheme.errorContainer
+        VoiceNetworkRequirement.MISSING_DATA -> MaterialTheme.colorScheme.errorContainer
+        VoiceNetworkRequirement.UNAVAILABLE -> MaterialTheme.colorScheme.error
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+
+    @Composable
+    fun voiceStatusLabel(requirement: VoiceNetworkRequirement): String = when (requirement) {
+        VoiceNetworkRequirement.KNOWN_OFFLINE -> "Known Offline"
+        VoiceNetworkRequirement.NETWORK_REQUIRED -> "Network Required"
+        VoiceNetworkRequirement.MISSING_DATA -> "Voice Data Missing"
+        VoiceNetworkRequirement.UNAVAILABLE -> "Unavailable"
+        VoiceNetworkRequirement.UNKNOWN -> "Unknown"
+    }
+
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 24.dp, vertical = 28.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        Text("Read Aloud Voice", style = MaterialTheme.typography.headlineSmall)
+        Text("Choose a voice for Read Aloud. Strict Offline Speech is ${if (strictOffline) "ON" else "OFF"}.",
+            style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("Strict Offline Speech", style = MaterialTheme.typography.titleMedium)
+                Text("Only use voices that work without internet", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Switch(
+                checked = strictOffline,
+                onCheckedChange = { enabled -> scope.launch { settingsRepository.setStrictOfflineSpeech(enabled) } },
+            )
+        }
+
+        if (strictOffline) {
+            Text(
+                "When enabled, Murmur will not use voices that need internet. " +
+                "If no compatible offline voice exists for your language, Read Aloud will not work until you install one.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+
+        HorizontalDivider()
+
+        Text("Available Voices", style = MaterialTheme.typography.titleMedium)
+
+        if (checking) {
+            Text("Loading voices…", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        } else if (availableVoices.isEmpty()) {
+            Column(Modifier.fillMaxWidth().padding(vertical = 24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("No TTS voices found on this device.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("Install a TTS engine (e.g., Google Speech Recognition & Synthesis) and download voice data for your language.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+Button(onClick = { launchTtsSettings = true }) { Text("Open TTS Settings") }
+            }
+        } else {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                availableVoices.forEach { voice ->
+                    val requirement = if (voice.name == selectedVoice) voiceEligibility
+                        else if (voice.requiresNetwork) VoiceNetworkRequirement.NETWORK_REQUIRED
+                        else VoiceNetworkRequirement.KNOWN_OFFLINE
+
+                    OutlinedCard(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = if (voice.name == selectedVoice) {
+                            CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.primaryContainer,
+                                contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                            )
+                        } else CardDefaults.cardColors(),
+                    ) {
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .clickable { scope.launch { settingsRepository.setSelectedSpeechVoice(voice.name) } }
+                                .padding(16.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        ) {
+                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text(voice.name, style = MaterialTheme.typography.titleMedium)
+                                Text(voice.localeTag, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Box(
+                                    modifier = Modifier.padding(end = 8.dp),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Text(
+                                        voiceStatusIcon(requirement),
+                                        style = MaterialTheme.typography.titleLarge,
+                                        color = voiceStatusColor(requirement),
+                                    )
+                                }
+                                Text(
+                                    voiceStatusLabel(requirement),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = voiceStatusColor(requirement),
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (strictOffline && availableVoices.none { it.name == selectedVoice && voiceEligibility == VoiceNetworkRequirement.KNOWN_OFFLINE }) {
+                val hasOfflineVoice = availableVoices.any { !it.requiresNetwork }
+                if (!hasOfflineVoice) {
+                    Column(Modifier.fillMaxWidth().padding(top = 16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Text(
+                            "No compatible offline voice is available for the selected language. " +
+                            "Install offline voice data in your device's TTS settings or import a compatible local speech model.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                        Button(onClick = { launchTtsSettings = true }) { Text("Open TTS Settings") }
+                    }
+                }
+            }
+        }
+
+        error?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error) }
     }
 }
 

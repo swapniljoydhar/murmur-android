@@ -13,6 +13,15 @@ junit = "4.13.2"
 androidxTest = "1.7.0"
 androidxTestExt = "1.3.0"
 espresso = "3.7.0"
+glance = "1.2.0"
+glanceWear = "1.0.0-alpha20"
+kotlinxSerialization = "1.8.0"
+kotlinxCoroutines = "1.8.0"
+kotlinxCoroutinesTest = "1.8.0"
+documentfile = "1.1.0"
+appcompat = "1.6.1"
+cardview = "1.0.0"
+# sherpaOnnx = "1.12.6"  # Uncomment when AAR is available
 
 [libraries]
 androidx-activity-compose = { module = "androidx.activity:activity-compose", version.ref = "activityCompose" }
@@ -32,13 +41,23 @@ androidx-room-compiler = { module = "androidx.room:room-compiler", version.ref =
 androidx-media3-exoplayer = { module = "androidx.media3:media3-exoplayer", version.ref = "media3" }
 androidx-media3-session = { module = "androidx.media3:media3-session", version.ref = "media3" }
 androidx-media3-inspector = { module = "androidx.media3:media3-inspector", version.ref = "media3" }
+androidx-glance-appwidget = { module = "androidx.glance:glance-appwidget", version.ref = "glance" }
+androidx-glance-wear = { module = "androidx.glance.wear:wear", version.ref = "glanceWear" }
 junit = { module = "junit:junit", version.ref = "junit" }
 androidx-test-core = { module = "androidx.test:core-ktx", version.ref = "androidxTest" }
 androidx-test-runner = { module = "androidx.test:runner", version.ref = "androidxTest" }
 androidx-test-ext-junit = { module = "androidx.test.ext:junit", version.ref = "androidxTestExt" }
 androidx-test-espresso-core = { module = "androidx.test.espresso:espresso-core", version.ref = "espresso" }
+kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "kotlinxSerialization" }
+androidx-documentfile = { module = "androidx.documentfile:documentfile", version.ref = "documentfile" }
+kotlinx-coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", version.ref = "kotlinxCoroutinesTest" }
+androidx-appcompat = { module = "androidx.appcompat:appcompat", version.ref = "appcompat" }
+androidx-cardview = { module = "androidx.cardview:cardview", version.ref = "cardview" }
+# sherpa-onnx = { module = "com.k2-fsa:sherpa-onnx", version.ref = "sherpaOnnx" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
 ksp = { id = "com.google.devtools.ksp", version.ref = "ksp" }
+kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
+

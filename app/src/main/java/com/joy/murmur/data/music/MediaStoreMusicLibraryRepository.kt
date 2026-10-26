@@ -22,6 +22,7 @@ import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.withContext
 import com.joy.murmur.data.playback.MusicCatalogStore
 import com.joy.murmur.data.playback.MusicTrackEntity
@@ -29,13 +30,14 @@ import java.util.UUID
 
 class MediaStoreMusicLibraryRepository(context: Context, private val catalogStore: MusicCatalogStore) : MusicLibraryRepository {
     private val appContext = context.applicationContext
+    private var currentSyncToken: String? = null
 
     override fun observeLibrary() = combine(catalogStore.observeTracks(), catalogStore.observeState()) { tracks, state ->
         MusicLibrarySnapshot(
             hasScanned = state?.hasScanned == true,
             tracks = tracks.map(MusicTrackEntity::toDomain),
         )
-    }
+    }.distinctUntilChanged()
 
     override fun observeMediaChanges(): Flow<Set<Long>?> = callbackFlow {
         val resolver = appContext.contentResolver
@@ -45,7 +47,7 @@ class MediaStoreMusicLibraryRepository(context: Context, private val catalogStor
             MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
         }
         val handler = Handler(Looper.getMainLooper())
-        val changedIds = linkedSetOf<Long>()
+        val changedIds = mutableSetOf<Long>()
         var fullRefreshRequired = false
         val flush = Runnable {
             val batch = if (fullRefreshRequired) null else changedIds.toSet()
@@ -55,7 +57,7 @@ class MediaStoreMusicLibraryRepository(context: Context, private val catalogStor
         }
         fun collectChange(uri: Uri?) {
             val id = uri?.lastPathSegment?.toLongOrNull()
-            if (id == null) fullRefreshRequired = true else changedIds += id
+            if (id == null) fullRefreshRequired = true else changedIds.add(id)
             handler.removeCallbacks(flush)
             handler.postDelayed(flush, 600L)
         }
@@ -101,36 +103,52 @@ class MediaStoreMusicLibraryRepository(context: Context, private val catalogStor
         val tracks = resolver.query(collection, projection, selection, null, sortOrder)?.use { cursor ->
             cursor.toMusicTracks(collection)
         }.orEmpty()
+        
+        // Use stable sync token for this refresh session
         val syncToken = UUID.randomUUID().toString()
+        currentSyncToken = syncToken
         catalogStore.replaceSnapshot(tracks.map { it.toEntity(syncToken) }, syncToken)
         tracks
     }
 
     override suspend fun refreshChangedItem(mediaStoreId: Long) = withContext(Dispatchers.IO) {
-        ensurePermission()
-        val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
+        // Check current permission state
+        val permission = if (Build.VERSION.SDK_INT >= 33) {
+            Manifest.permission.READ_MEDIA_AUDIO
         } else {
-            MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
+            Manifest.permission.READ_EXTERNAL_STORAGE
         }
-        val projection = arrayOf(
-            MediaStore.Audio.Media._ID,
-            MediaStore.Audio.Media.TITLE,
-            MediaStore.Audio.Media.DISPLAY_NAME,
-            MediaStore.Audio.Media.ARTIST,
-            MediaStore.Audio.Media.ALBUM,
-            MediaStore.Audio.Media.DURATION,
-            MediaStore.Audio.Media.RELATIVE_PATH,
-            MediaStore.Audio.Media.MIME_TYPE,
-            MediaStore.Audio.Media.DATE_MODIFIED,
-        )
-        val selection = "${MediaStore.Audio.Media._ID} = ? AND ${MediaStore.Audio.Media.IS_MUSIC} != 0 AND ${MediaStore.Audio.Media.DURATION} > 0"
-        val item = appContext.contentResolver.query(collection, projection, selection, arrayOf(mediaStoreId.toString()), null)
-            ?.use { cursor -> cursor.toMusicTracks(collection).firstOrNull() }
-        if (item == null) {
-            catalogStore.removeChangedTrack("mediastore:$mediaStoreId")
+        if (ContextCompat.checkSelfPermission(appContext, permission) != PackageManager.PERMISSION_GRANTED) {
+            // Permission lost; trigger full refresh on next scan
+            // Use empty block instead of return
         } else {
-            catalogStore.upsertChangedTrack(item.toEntity("item-update"))
+            val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
+            } else {
+                MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
+            }
+            val projection = arrayOf(
+                MediaStore.Audio.Media._ID,
+                MediaStore.Audio.Media.TITLE,
+                MediaStore.Audio.Media.DISPLAY_NAME,
+                MediaStore.Audio.Media.ARTIST,
+                MediaStore.Audio.Media.ALBUM,
+                MediaStore.Audio.Media.DURATION,
+                MediaStore.Audio.Media.RELATIVE_PATH,
+                MediaStore.Audio.Media.MIME_TYPE,
+                MediaStore.Audio.Media.DATE_MODIFIED,
+            )
+            val selection = "${MediaStore.Audio.Media._ID} = ? AND ${MediaStore.Audio.Media.IS_MUSIC} != 0 AND ${MediaStore.Audio.Media.DURATION} > 0"
+            val item = appContext.contentResolver.query(collection, projection, selection, arrayOf(mediaStoreId.toString()), null)
+                ?.use { cursor -> cursor.toMusicTracks(collection).firstOrNull() }
+            
+            // Use the current sync token so item updates don't get deleted on next full refresh
+            val token = currentSyncToken ?: "item-update"
+            if (item == null) {
+                catalogStore.removeChangedTrack("mediastore:$mediaStoreId")
+            } else {
+                catalogStore.upsertChangedTrack(item.toEntity(token))
+            }
         }
     }
 

@@ -1,4 +1,4 @@
-package com.joy.murmur.data.documents
+﻿package com.joy.murmur.data.documents
 
 import android.content.Context
 import android.graphics.Bitmap
@@ -6,15 +6,21 @@ import android.graphics.pdf.PdfRenderer
 import android.net.Uri
 import android.text.Html
 import android.provider.OpenableColumns
+import com.joy.murmur.data.playback.DocumentStructureEntity
 import com.joy.murmur.data.playback.ReaderBookmarkEntity
 import com.joy.murmur.data.playback.ReaderDocumentEntity
 import com.joy.murmur.data.playback.ReaderDocumentStore
 import com.joy.murmur.domain.documents.DocumentLibraryRepository
 import com.joy.murmur.domain.documents.DocumentSearchMatch
+import com.joy.murmur.domain.documents.DocumentStructure
 import com.joy.murmur.domain.documents.PdfPage
 import com.joy.murmur.domain.documents.ReaderBookmark
 import com.joy.murmur.domain.documents.ReaderDocument
+import com.joy.murmur.domain.documents.Section
 import com.joy.murmur.playback.toStableMediaId
+import com.joy.murmur.data.documents.PdfTextExtractor
+import com.joy.murmur.data.documents.EpubParser
+import com.joy.murmur.data.documents.TocEntry
 import java.io.InputStreamReader
 import java.io.PushbackInputStream
 import java.io.Reader
@@ -30,6 +36,9 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.encodeToString
 import kotlinx.coroutines.withContext
 
 class RoomDocumentLibraryRepository(context: Context, private val store: ReaderDocumentStore) : DocumentLibraryRepository {
@@ -73,6 +82,30 @@ class RoomDocumentLibraryRepository(context: Context, private val store: ReaderD
     }
 
     override suspend fun removeBookmark(bookmarkId: String) = store.removeBookmark(bookmarkId)
+    override suspend fun buildDocumentIndex(documentId: String): DocumentStructure {
+        val entity = store.getDocumentStructure(documentId)
+        if (entity != null) {
+            return entity.toDomain()
+        }
+        // Build index if not exists
+        val document = store.getDocument(documentId) ?: throw IllegalArgumentException("Document not found")
+        val readerDoc = ReaderDocument(document.id, Uri.parse(document.uri), document.title, document.mimeType, document.addedAtMillis, document.positionChars)
+        val structure = DocumentIndexer(appContext).buildIndex(document)
+        store.saveDocumentStructure(structure.toEntity())
+        return structure
+    }
+
+    override suspend fun getDocumentStructure(documentId: String): DocumentStructure? {
+        return store.getDocumentStructure(documentId)?.toDomain()
+    }
+
+    override suspend fun saveDocumentStructure(structure: DocumentStructure) {
+        store.saveDocumentStructure(structure.toEntity())
+    }
+
+    override fun observeDocumentStructure(documentId: String): Flow<DocumentStructure?> {
+        return store.observeDocumentStructure(documentId).map { it?.toDomain() }
+    }
 
     override suspend fun readPage(document: ReaderDocument, startChar: Long, maxChars: Int): String = withContext(Dispatchers.IO) {
         require(document.mimeType != "application/pdf") { "PDF pages are rendered as images and do not contain extracted text yet." }
@@ -139,12 +172,39 @@ class RoomDocumentLibraryRepository(context: Context, private val store: ReaderD
         }
     }
 
+    override suspend fun extractPdfPageText(document: ReaderDocument, pageIndex: Int): String? = withContext(Dispatchers.IO) {
+        require(document.mimeType == "application/pdf") { "This document isn't a PDF." }
+        
+        // Use PdfTextExtractor (API 29+) for text extraction
+        val text = PdfTextExtractor.extractPageText(appContext, document.uri, pageIndex)
+        if (text != null) return@withContext text
+        
+        // Fallback: return empty string for older API levels
+        val descriptor = appContext.contentResolver.openFileDescriptor(document.uri, "r")
+            ?: throw IllegalStateException("This PDF is no longer available.")
+        descriptor.use { parcel ->
+            PdfRenderer(parcel).use { renderer ->
+                require(renderer.pageCount > 0) { "This PDF doesn't contain any pages." }
+                val safePageIndex = pageIndex.coerceIn(0, renderer.pageCount - 1)
+                renderer.openPage(safePageIndex).use { page ->
+                    // Text extraction not available on this API level
+                    ""
+                }
+            }
+        }
+    }
+
     override suspend fun searchDocument(document: ReaderDocument, query: String, limit: Int): List<DocumentSearchMatch> = withContext(Dispatchers.IO) {
         val needle = query.trim()
         require(needle.isNotEmpty() && needle.length <= 128) { "Enter between 1 and 128 characters to search." }
         val safeLimit = limit.coerceIn(1, 100)
         when (document.mimeType) {
-            "application/pdf" -> throw IllegalArgumentException("Search isn't available for PDF image pages yet.")
+            "application/pdf" -> {
+                // Use PdfTextExtractor (API 29+) for search
+                val text = PdfTextExtractor.extractAllText(appContext, document.uri)
+                if (text != null) searchText(text, needle, safeLimit)
+                else throw IllegalArgumentException("PDF text search requires Android 10 (API 29) or higher.")
+            }
             "text/html" -> searchText(readHtmlText(document.uri), needle, safeLimit)
             "application/epub+zip" -> searchText(readEpubText(document.uri), needle, safeLimit)
             else -> {
@@ -199,24 +259,21 @@ class RoomDocumentLibraryRepository(context: Context, private val store: ReaderD
     }
 
     private suspend fun readEpubText(uri: Uri): String {
-        val input = appContext.contentResolver.openInputStream(uri) ?: throw IllegalStateException("Document is no longer available")
-        val archiveEntries = input.use { zipInput ->
-            ZipInputStream(zipInput).use { zip -> readEpubEntries(zip) }
-        }
+        val archiveEntries = EpubParser.readEntries(appContext, uri)
         val container = archiveEntries["META-INF/container.xml"]
             ?: throw IllegalArgumentException("This EPUB is missing its package information.")
-        val containerXml = parseXml(container)
-        val rootfile = elements(containerXml, "rootfile").firstOrNull()
+        val containerXml = EpubParser.parseXml(container)
+        val rootfile = EpubParser.elements(containerXml, "rootfile").firstOrNull()
             ?: throw IllegalArgumentException("This EPUB has no readable book package.")
         val packagePath = rootfile.getAttribute("full-path").takeIf(String::isNotBlank)
             ?: throw IllegalArgumentException("This EPUB has no readable book package.")
         val packageXml = archiveEntries[packagePath]
             ?: throw IllegalArgumentException("This EPUB book package could not be opened.")
-        val packageDocument = parseXml(packageXml)
-        val manifest = elements(packageDocument, "item").associate { item ->
-            item.getAttribute("id") to resolveZipPath(packagePath, item.getAttribute("href"))
+        val packageDocument = EpubParser.parseXml(packageXml)
+        val manifest = EpubParser.elements(packageDocument, "item").associate { item ->
+            item.getAttribute("id") to EpubParser.resolveZipPath(packagePath, item.getAttribute("href"))
         }
-        val chapterPaths = elements(packageDocument, "itemref")
+        val chapterPaths = EpubParser.elements(packageDocument, "itemref")
             .mapNotNull { manifest[it.getAttribute("idref")] }
             .filter { it.endsWith(".xhtml", true) || it.endsWith(".html", true) || it.endsWith(".htm", true) }
         if (chapterPaths.isEmpty()) throw IllegalArgumentException("This EPUB doesn't contain readable chapters.")
@@ -283,80 +340,9 @@ class RoomDocumentLibraryRepository(context: Context, private val store: ReaderD
     private fun snippetAround(text: String, matchIndex: Int, queryLength: Int): String {
         val start = (matchIndex - 48).coerceAtLeast(0)
         val end = (matchIndex + queryLength + 72).coerceAtMost(text.length)
-        val prefix = if (start > 0) "…" else ""
-        val suffix = if (end < text.length) "…" else ""
+        val prefix = if (start > 0) "â€¦" else ""
+        val suffix = if (end < text.length) "â€¦" else ""
         return prefix + text.substring(start, end).replace(Regex("\\s+"), " ").trim() + suffix
-    }
-
-    private suspend fun readEpubEntries(zip: ZipInputStream): Map<String, ByteArray> {
-        val entries = mutableMapOf<String, ByteArray>()
-        val buffer = ByteArray(8192)
-        var totalUncompressed = 0L
-        var totalCaptured = 0L
-        while (true) {
-            currentCoroutineContext().ensureActive()
-            val entry = zip.nextEntry ?: break
-            val name = entry.name
-            val isMetadata = name == "META-INF/container.xml" || name.endsWith(".opf", ignoreCase = true)
-            val isChapter = name.endsWith(".xhtml", ignoreCase = true) || name.endsWith(".html", ignoreCase = true) || name.endsWith(".htm", ignoreCase = true)
-            val captureLimit = when {
-                isMetadata -> MAX_EPUB_METADATA_BYTES
-                isChapter -> MAX_EPUB_CHAPTER_BYTES
-                else -> 0
-            }
-            val output = if (captureLimit > 0) ByteArrayOutputStream() else null
-            var entrySize = 0
-            while (true) {
-                currentCoroutineContext().ensureActive()
-                val count = zip.read(buffer)
-                if (count < 0) break
-                totalUncompressed += count
-                entrySize += count
-                if (totalUncompressed > MAX_EPUB_UNCOMPRESSED_BYTES) {
-                    throw IllegalArgumentException("This EPUB expands beyond Murmur's 64 MB safety limit.")
-                }
-                if (entrySize > captureLimit && captureLimit > 0) {
-                    throw IllegalArgumentException("This EPUB contains a chapter or package file that is too large to read safely.")
-                }
-                if (output != null) output.write(buffer, 0, count)
-            }
-            if (output != null) {
-                totalCaptured += output.size()
-                if (totalCaptured > MAX_EPUB_CAPTURED_BYTES) {
-                    throw IllegalArgumentException("This EPUB contains too much chapter text to read safely.")
-                }
-                entries[name] = output.toByteArray()
-            }
-            zip.closeEntry()
-        }
-        return entries
-    }
-
-    private fun parseXml(bytes: ByteArray): org.w3c.dom.Document {
-        val factory = DocumentBuilderFactory.newInstance().apply {
-            isNamespaceAware = true
-            isXIncludeAware = false
-            setExpandEntityReferences(false)
-            setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)
-            setFeature("http://xml.org/sax/features/external-general-entities", false)
-            setFeature("http://xml.org/sax/features/external-parameter-entities", false)
-        }
-        return factory.newDocumentBuilder().parse(ByteArrayInputStream(bytes))
-    }
-
-    private fun elements(document: org.w3c.dom.Document, name: String): List<org.w3c.dom.Element> {
-        val namespaced = document.getElementsByTagNameNS("*", name)
-        val nodes = if (namespaced.length > 0) namespaced else document.getElementsByTagName(name)
-        return (0 until nodes.length).mapNotNull { nodes.item(it) as? org.w3c.dom.Element }
-    }
-
-    private fun resolveZipPath(packagePath: String, href: String): String {
-        require(href.isNotBlank()) { "This EPUB contains an invalid chapter path." }
-        val resolved = URI(packagePath).resolve(URI(href.substringBefore('#'))).normalize().path.removePrefix("/")
-        require(resolved.isNotBlank() && !resolved.startsWith("../") && resolved != "..") {
-            "This EPUB contains a chapter path outside its package."
-        }
-        return resolved
     }
 
     private fun htmlToPlainText(source: String): String = Html.fromHtml(
@@ -382,6 +368,21 @@ class RoomDocumentLibraryRepository(context: Context, private val store: ReaderD
         else -> Charsets.UTF_8 to 0
     }
 
+    override suspend fun getEpubToc(documentId: String): List<TocEntry> = withContext(Dispatchers.IO) {
+        val document = store.getDocument(documentId) ?: throw IllegalArgumentException("Document not found")
+        require(document.mimeType == "application/epub+zip") { "Document is not an EPUB" }
+        val uri = Uri.parse(document.uri)
+        val entries = EpubParser.readEntries(appContext, uri)
+        val container = entries["META-INF/container.xml"]
+            ?: throw IllegalArgumentException("This EPUB is missing its package information.")
+        val containerXml = EpubParser.parseXml(container)
+        val rootfile = EpubParser.elements(containerXml, "rootfile").firstOrNull()
+            ?: throw IllegalArgumentException("This EPUB has no readable book package.")
+        val packagePath = rootfile.getAttribute("full-path").takeIf(String::isNotBlank)
+            ?: throw IllegalArgumentException("This EPUB has no readable book package.")
+        return@withContext EpubParser.parseToc(entries, packagePath)
+    }
+
     private companion object {
         const val MAX_HTML_CHARACTERS = 4 * 1024 * 1024
         const val MAX_EPUB_METADATA_BYTES = 1024 * 1024
@@ -390,4 +391,31 @@ class RoomDocumentLibraryRepository(context: Context, private val store: ReaderD
         const val MAX_EPUB_UNCOMPRESSED_BYTES = 64L * 1024L * 1024L
         const val MAX_PDF_PIXELS = 4_000_000L
     }
+}
+
+private fun DocumentStructureEntity.toDomain(): DocumentStructure {
+    val sections = Json { ignoreUnknownKeys = true }.decodeFromString<List<Section>>(sectionsJson)
+    return DocumentStructure(
+        documentId = documentId,
+        mimeType = mimeType,
+        totalChars = totalChars,
+        totalLines = totalLines,
+        sections = sections,
+        fingerprint = fingerprint,
+        indexVersion = indexVersion,
+    )
+}
+
+private fun DocumentStructure.toEntity(): DocumentStructureEntity {
+    return DocumentStructureEntity(
+        documentId = documentId,
+        mimeType = mimeType,
+        totalChars = totalChars,
+        totalLines = totalLines,
+        sectionsJson = Json { prettyPrint = true }.encodeToString(sections),
+        fingerprint = fingerprint,
+        indexVersion = indexVersion,
+        createdAtMillis = System.currentTimeMillis(),
+        updatedAtMillis = System.currentTimeMillis(),
+    )
 }

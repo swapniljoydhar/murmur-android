@@ -5,6 +5,8 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.navigation.NavHostController
+import androidx.navigation.compose.rememberNavController
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.joy.murmur.domain.settings.AppearanceMode
 import com.joy.murmur.domain.settings.SettingsRepository
@@ -12,7 +14,6 @@ import com.joy.murmur.ui.MurmurApp
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.update
-import kotlinx.coroutines.runBlocking
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -25,7 +26,7 @@ class MurmurNavigationTest {
     @Test
     fun continueHubOpensEveryContentSection() {
         composeRule.setContent {
-            MurmurApp(settingsRepository = TestSettingsRepository())
+            TestContent()
         }
 
         composeRule.onNodeWithText("A quiet place for your local media.").assertIsDisplayed()
@@ -46,6 +47,20 @@ class MurmurNavigationTest {
 
         composeRule.onNodeWithTag("destination-read-aloud").performClick()
         composeRule.onNodeWithText("Open a document to start reading aloud when document and speech support are added.").assertIsDisplayed()
+    }
+
+    @androidx.compose.runtime.Composable
+    fun TestContent() {
+        val navController = rememberNavController()
+        MurmurApp(
+            settingsRepository = TestSettingsRepository(),
+            navController = navController,
+            playbackController = null,
+            musicLibraryRepository = null,
+            musicPlaylistRepository = null,
+            audiobookLibraryRepository = null,
+            documentLibraryRepository = null,
+        )
     }
 
     private class TestSettingsRepository : SettingsRepository {

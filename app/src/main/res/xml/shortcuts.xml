@@ -1,0 +1,53 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="continue"
+        android:enabled="true"
+        android:icon="@drawable/ic_shortcut_continue"
+        android:shortcutShortLabel="@string/shortcut_continue"
+        android:shortcutLongLabel="@string/shortcut_continue_long">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="com.joy.murmur"
+            android:targetClass="com.joy.murmur.MainActivity"
+            android:data="murmur://continue" />
+        <categories android:name="android.shortcut.conversation" />
+    </shortcut>
+    <shortcut
+        android:shortcutId="music"
+        android:enabled="true"
+        android:icon="@drawable/ic_shortcut_music"
+        android:shortcutShortLabel="@string/shortcut_music"
+        android:shortcutLongLabel="@string/shortcut_music_long">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="com.joy.murmur"
+            android:targetClass="com.joy.murmur.MainActivity"
+            android:data="murmur://music" />
+    </shortcut>
+    <shortcut
+        android:shortcutId="audiobooks"
+        android:enabled="true"
+        android:icon="@drawable/ic_shortcut_audiobook"
+        android:shortcutShortLabel="@string/shortcut_audiobooks"
+        android:shortcutLongLabel="@string/shortcut_audiobooks_long">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="com.joy.murmur"
+            android:targetClass="com.joy.murmur.MainActivity"
+            android:data="murmur://audiobooks" />
+    </shortcut>
+    <shortcut
+        android:shortcutId="documents"
+        android:enabled="true"
+        android:icon="@drawable/ic_shortcut_document"
+        android:shortcutShortLabel="@string/shortcut_documents"
+        android:shortcutLongLabel="@string/shortcut_documents_long">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="com.joy.murmur"
+            android:targetClass="com.joy.murmur.MainActivity"
+            android:data="murmur://documents" />
+    </shortcut>
+</shortcuts>
+

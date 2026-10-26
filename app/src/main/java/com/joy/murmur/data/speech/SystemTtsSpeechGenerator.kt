@@ -4,6 +4,7 @@ import android.content.Context
 import android.media.AudioFormat
 import android.net.Uri
 import android.os.Bundle
+import android.os.StatFs
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import com.joy.murmur.data.playback.PlaybackDatabase
@@ -27,14 +28,14 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 
-enum class VoiceNetworkRequirement { KNOWN_OFFLINE, NETWORK_REQUIRED, UNKNOWN, UNAVAILABLE }
+enum class VoiceNetworkRequirement { KNOWN_OFFLINE, NETWORK_REQUIRED, UNKNOWN, UNAVAILABLE, MISSING_DATA }
 
 data class SpeechVoiceOption(val name: String, val localeTag: String, val requiresNetwork: Boolean) {
     val label: String
         get() = "${localeTag.ifBlank { "Unknown language" }} · ${if (requiresNetwork) "Network required" else "On device"}"
 }
 
-data class GeneratedSpeechFile(val file: File, val segmentIndex: Int, val sourceOffset: Int)
+data class GeneratedSpeechFile(val file: File, val segmentIndex: Int, val sourceOffset: Int, val sentenceIds: List<String> = emptyList())
 
 class SystemTtsSpeechGenerator(context: Context) {
     private data class Capture(
@@ -124,6 +125,18 @@ class SystemTtsSpeechGenerator(context: Context) {
         check(engine.setVoice(selected) == TextToSpeech.SUCCESS) { "The system speech engine couldn't select that voice." }
     }
 
+    fun currentIdentity(): String {
+        return listOf(engine.defaultEngine.orEmpty(), engine.voice?.name.orEmpty(), engine.voice?.locale?.toLanguageTag().orEmpty())
+            .joinToString("|")
+    }
+
+    suspend fun synthesize(
+        text: String,
+        identity: SynthesisIdentity,
+        strictOffline: Boolean,
+        documentStructure: Any? = null,
+    ): List<GeneratedSpeechFile> = synthesize(text, identity.toString(), strictOffline)
+
     suspend fun synthesize(text: String, identity: String, strictOffline: Boolean): List<GeneratedSpeechFile> = synthesisMutex.withLock {
         awaitReady()
         when (voiceNetworkRequirement()) {
@@ -131,6 +144,7 @@ class SystemTtsSpeechGenerator(context: Context) {
             VoiceNetworkRequirement.UNKNOWN -> if (strictOffline) throw IllegalStateException("This system voice's network requirement is unknown. Turn off Strict Offline Speech only if you accept that it may use a network.")
             VoiceNetworkRequirement.UNAVAILABLE -> throw IllegalStateException("The system speech engine isn't available on this device.")
             VoiceNetworkRequirement.KNOWN_OFFLINE -> Unit
+            VoiceNetworkRequirement.MISSING_DATA -> if (strictOffline) throw IllegalStateException("Voice data is missing. Install voice data while online or choose a different voice.")
         }
         val queuedFiles = playbackStore.queue().mapNotNull { item ->
             Uri.parse(item.uri).takeIf { it.scheme == "file" }?.path
@@ -144,13 +158,32 @@ class SystemTtsSpeechGenerator(context: Context) {
                 val destination = File(outputDirectory, "$digest.wav")
                 if (destination.isFile && destination.length() > 44L) {
                     destination.setLastModified(System.currentTimeMillis())
-                    GeneratedSpeechFile(destination, index, chunk.sourceOffset)
+                    GeneratedSpeechFile(destination, index, chunk.sourceOffset, chunk.sentenceIds)
                 } else {
+                    // Check free space before synthesis
+                    if (!hasFreeSpace()) {
+                        throw IllegalStateException("Insufficient storage space for speech synthesis. Free up space and try again.")
+                    }
                     synthesizeChunk(chunk.text, destination)
                     destination.setLastModified(System.currentTimeMillis())
-                    GeneratedSpeechFile(destination, index, chunk.sourceOffset)
+                    GeneratedSpeechFile(destination, index, chunk.sourceOffset, chunk.sentenceIds)
                 }
             }
+        }
+    }
+
+    /**
+     * Checks if there's sufficient free space on the cache partition for new synthesis.
+     * Requires at least 50 MB free space.
+     */
+    private fun hasFreeSpace(): Boolean {
+        try {
+            val statFs = StatFs(outputDirectory.path)
+            val availableBytes = statFs.availableBlocksLong * statFs.blockSizeLong
+            return availableBytes >= 50 * 1024 * 1024L // 50 MB minimum
+        } catch (_: Exception) {
+            // If we can't determine free space, allow the operation
+            return true
         }
     }
 
@@ -303,15 +336,25 @@ class SystemTtsSpeechGenerator(context: Context) {
         val sentenceMatches = Regex("[^.!?。！？\\n]+(?:[.!?。！？]+|\\n+|$)").findAll(text).toList()
         var currentStart = -1
         var current = StringBuilder()
+        var currentSentenceIds = mutableListOf<String>()
+        val sentenceIdGenerator = mutableMapOf<Int, String>()
+        var sentenceCounter = 0
         fun flush() {
             val speech = current.toString().trim()
-            if (speech.isNotEmpty()) output += SpeechChunk(currentStart.coerceAtLeast(0), speech)
+            if (speech.isNotEmpty()) {
+                val ids = currentSentenceIds.toList()
+                output += SpeechChunk(currentStart.coerceAtLeast(0), speech, ids)
+            }
             current = StringBuilder()
+            currentSentenceIds.clear()
             currentStart = -1
         }
         sentenceMatches.forEach { match ->
             val sentence = match.value.trim()
             if (sentence.isEmpty()) return@forEach
+            sentenceCounter++
+            val sentenceId = "s$sentenceCounter"
+            sentenceIdGenerator[match.range.first] = sentenceId
             if (sentence.length > limit) {
                 flush()
                 var offset = 0
@@ -321,7 +364,7 @@ class SystemTtsSpeechGenerator(context: Context) {
                         val boundary = sentence.lastIndexOf(' ', end)
                         if (boundary > offset + limit / 2) end = boundary
                     }
-                    output += SpeechChunk(match.range.first + offset, sentence.substring(offset, end).trim())
+                    output += SpeechChunk(match.range.first + offset, sentence.substring(offset, end).trim(), listOf(sentenceId))
                     offset = end
                     while (offset < sentence.length && sentence[offset].isWhitespace()) offset++
                 }
@@ -331,13 +374,14 @@ class SystemTtsSpeechGenerator(context: Context) {
                 if (current.isEmpty()) currentStart = match.range.first
                 if (current.isNotEmpty()) current.append(' ')
                 current.append(sentence)
+                currentSentenceIds.add(sentenceId)
             }
         }
         flush()
         return output
     }
 
-    private data class SpeechChunk(val sourceOffset: Int, val text: String)
+    private data class SpeechChunk(val sourceOffset: Int, val text: String, val sentenceIds: List<String>)
 
     private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
         .digest(value.toByteArray(Charsets.UTF_8))

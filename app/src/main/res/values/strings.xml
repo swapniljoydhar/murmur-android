@@ -1,0 +1,28 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Murmur</string>
+    <string name="shortcut_continue">Continue</string>
+    <string name="shortcut_continue_long">Continue where you left off</string>
+    <string name="shortcut_music">Music</string>
+    <string name="shortcut_music_long">Open music library</string>
+    <string name="shortcut_audiobooks">Audiobooks</string>
+    <string name="shortcut_audiobooks_long">Open audiobook library</string>
+    <string name="shortcut_documents">Documents</string>
+    <string name="shortcut_documents_long">Open document library</string>
+    <string name="widget_prev">Previous</string>
+    <string name="widget_play_pause">Play/Pause</string>
+    <string name="widget_next">Next</string>
+    <string name="widget_description">Murmur Now Playing widget</string>
+    <string name="widget_default_title">Murmur</string>
+    <string name="widget_artwork_desc">Album artwork</string>
+    <string name="widget_previous_desc">Play previous</string>
+    <string name="widget_play_desc">Play</string>
+    <string name="widget_pause_desc">Pause</string>
+    <string name="widget_next_desc">Play next</string>
+    <string name="widget_configure_title">Now Playing Widget</string>
+    <string name="widget_configure_desc">Tap Done to add the widget to your home screen.</string>
+    <string name="widget_done">Done</string>
+    <string name="widget_cancel">Cancel</string>
+    <string name="open_with_prompt">Open with Murmur</string>
+    <string name="share_into_prompt">Share to Murmur</string>
+</resources>

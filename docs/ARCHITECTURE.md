@@ -1,28 +1,50 @@
-# Foundation architecture
+# Murmur Architecture
 
-## Current structure
+## Overview
 
-The project is a single Android application module. Packages separate platform entry points (`com.joy.murmur`), durable data adapters (`data.settings`), repository contracts and app concepts (`domain.settings`), UI/navigation (`ui`), and theme (`ui.theme`). The app creates the settings repository at the activity boundary and passes it to Compose. UI screens consume a domain repository interface rather than depending on DataStore directly.
+Murmur follows a single-playback-owner architecture where all audio (music, audiobooks, Read Aloud TTS) flows through one ExoPlayer instance managed by a MediaSessionService.
 
-## Local state
+## Playback Layer
 
-Preferences DataStore stores appearance mode, adjustable reader text size, background music refresh opt-in, selected system TTS voice, and Strict Offline Speech (enabled by default). Playback uses Room for its durable queue, active position, and per-media listening progress. The playback service persists these values together in a database transaction and retains position, duration, media URI, title, content type, and last-updated time. `domain.audiobooks.AudiobookProgressRepository` exposes unfinished audiobook positions in recently-listened order, without tying the domain to Room. `domain.audiobooks.AudiobookLibraryRepository` stores user-selected audiobook URIs and available title/author/duration metadata plus an optional downsized embedded cover image; the Audiobooks screen merges the library with saved progress and resumes at the stored position. Audiobook bookmarks store seek positions and are removed when their parent book is removed. Supported embedded chapter markers are stored with seek positions and cascade-delete with their book. `domain.documents.DocumentLibraryRepository` stores SAF URI references, reading positions, and bookmarks for TXT/Markdown/HTML/EPUB/PDF documents. It reads text pages from the provider on IO, renders PDF pages to bounded local bitmaps, and never copies source files. Room version 10 adds audiobook chapters through a migration from version 9. `data.speech.SystemTtsSpeechGenerator` uses Android's selected system voice, reports the engine's network requirement, converts callback PCM using the reported format to atomically finalized WAV cache files, and returns bounded segments for the shared Media3 queue. Text speech may schedule the next bounded page after the current page finishes. Cache eviction has age/size limits and queued-file protection; cross-instance cache races and process-death continuity still need verification. The combined Read & Listen route keeps generated segments out of Murmur's visible Up Next interface.
+```
+PlaybackController
+       ↓
+Primary ExoPlayer
+       ↓
+MediaSession
+       ↓
+MediaSessionService
+```
 
-Music discovery is separated behind `domain.music.MusicLibraryRepository`. `data.music.MediaStoreMusicLibraryRepository` queries Android's indexed audio collection on an IO dispatcher, requires the caller to have obtained audio-read permission, and maps only available metadata. Titles fall back to the indexed display name; unknown artist and album values stay absent. The Music screen asks for permission only after the user chooses Scan device, shows songs/artists/albums/folders and metadata search, and plays or queues selected results. It does not scan automatically at launch. Successful scans are persisted as an atomic Room catalog snapshot and observed back into the screen after process recreation. Item-level MediaStore notifications are batched and update just those catalog rows; collection-level changes trigger a full reconciliation. Optional daily background refresh is off by default, requires audio permission, and waits for battery-not-low conditions. Room version 2 adds catalog tables through a 1-to-2 migration, preserving playback queue and state.
+- **PlaybackController**: High-level API for queue management, playback control, snapshot publishing
+- **PlaybackService**: MediaSessionService hosting the ExoPlayer and MediaSession
+- **ExoPlayer**: Primary audio player for all content types
+- **MediaSession**: Exposes playback to system UI, Bluetooth, lock screen
 
-Music playlists have a concrete Room schema and `domain.music.MusicPlaylistRepository` contract with create, rename, delete, add, remove, and reorder operations. Track URIs and display metadata are stored as snapshots, so playlist membership remains identifiable even if a catalog refresh removes a file. Playlist tracks are ordered and cascade-delete with their parent playlist. Room version 3 adds these tables through a 2-to-3 migration. The Music screen exposes create/manage/play flows, adds songs from the Songs tab, and supports playlist and track ordering.
+## Data Layer
 
-## Navigation and product behavior
+- **Room Database**: Durable storage for positions, bookmarks, playlists, queue state
+- **DataStore**: Preferences for appearance, speech settings, text scale
+- **MediaStore**: Device-wide music discovery
+- **SAF**: Storage Access Framework for user-selected folders/files
 
-Continue is the start destination and links to Music, Audiobooks, and one combined Read & Listen destination. Music uses MediaStore discovery plus the Android Storage Access Framework picker for user-selected audio; Audiobooks and Documents also use the picker. Music, audiobooks, and generated speech share the playback session. Documents reads TXT/Markdown in bounded 12,000-character pages, HTML as rendered text from files up to 4 MB, EPUB spine chapters in order within archive and text limits, and PDF pages as bounded rendered images. It stores bookmark positions and never copies provider content. Text page requests reopen the SAF stream and skip from its start to the requested character offset; HTML and EPUB parsing is bounded but reparses the source for each page. Search scans TXT/Markdown incrementally and searches bounded rendered HTML/EPUB text; PDF page images are not searchable or available to Read Aloud. Efficient large-document seek still needs structural indexing.
+## Speech Layer
 
-## Privacy baseline
+- **SystemTtsSpeechGenerator**: System TTS with voice selection, strict offline mode
+- **TtsScheduler**: Bounded TTS generation with look-ahead buffer
+- **TtsCache**: Local WAV cache with SHA-256 keys
+- **NeuralTtsSpeechGenerator**: Optional Sherpa-ONNX neural TTS
 
-The manifest requests foreground-service permissions for active media playback and audio-read permissions for the Music library milestone; it has no internet permission. MediaStore access must be requested only when the user chooses library discovery. The existing Storage Access Framework path remains permissionless. No analytics, advertising, account, or cloud dependency is present.
+## UI Layer
 
-## Planned boundaries
+- **Jetpack Compose**: Modern declarative UI
+- **Material 3**: Design system
+- **Glance**: Home screen widgets
 
-- Playback is owned by one MediaController coordinator and one Media3 ExoPlayer/MediaSession service. Music, audiobooks, and generated speech share that pipeline.
-- The service mirrors the active queue and position to Room periodically and on player events. It restores a saved queue and seek position paused, without autoplay after process or device restart.
-- The local music catalog and playback state use Room; small user preferences remain in DataStore.
-- Incremental MediaStore provider queries, background music library refresh, playlist track reordering controls, audiobook chapter extraction and bookmarks, HTML/EPUB/PDF parsing, large-document indexing/search, reader presentation settings, continuous document speech, sentence synchronization, speech cache eviction, voice selection, backup, widgets, and OEM diagnostics are deferred to the implementation phases described in the root README.
+## Key Design Decisions
+
+1. **Local-first**: No INTERNET permission, all data stays on device
+2. **Single playback owner**: No independent players per screen
+3. **Process death resilience**: Position persisted to Room on pause, item transition, lifecycle events
+4. **Bounded TTS generation**: No unbounded pre-generation for long documents
+5. **OEM compatibility**: Diagnostics for background playback restrictions

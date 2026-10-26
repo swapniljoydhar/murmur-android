@@ -1,6 +1,7 @@
-package com.joy.murmur.domain.documents
+﻿package com.joy.murmur.domain.documents
 
 import android.net.Uri
+import com.joy.murmur.data.documents.TocEntry
 import kotlinx.coroutines.flow.Flow
 
 data class ReaderDocument(
@@ -38,5 +39,15 @@ interface DocumentLibraryRepository {
     suspend fun removeBookmark(bookmarkId: String)
     suspend fun readPage(document: ReaderDocument, startChar: Long, maxChars: Int = 12_000): String
     suspend fun renderPdfPage(document: ReaderDocument, pageIndex: Int, targetWidthPx: Int): PdfPage
+    suspend fun extractPdfPageText(document: ReaderDocument, pageIndex: Int): String?
     suspend fun searchDocument(document: ReaderDocument, query: String, limit: Int = 50): List<DocumentSearchMatch>
+    
+    // Document structure indexing for large documents
+    suspend fun buildDocumentIndex(documentId: String): DocumentStructure
+    suspend fun getDocumentStructure(documentId: String): DocumentStructure?
+    suspend fun saveDocumentStructure(structure: DocumentStructure)
+    fun observeDocumentStructure(documentId: String): Flow<DocumentStructure?>
+
+    // EPUB Table of Contents
+    suspend fun getEpubToc(documentId: String): List<TocEntry>
 }

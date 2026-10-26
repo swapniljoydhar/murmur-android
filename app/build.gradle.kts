@@ -2,6 +2,7 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.ksp)
+    alias(libs.plugins.kotlin.serialization)
 }
 
 ksp {
@@ -41,12 +42,20 @@ dependencies {
     androidTestImplementation(platform(libs.androidx.compose.bom))
 
     implementation(libs.androidx.activity.compose)
+    implementation(libs.androidx.appcompat)
+    implementation(libs.androidx.cardview)
     implementation(libs.androidx.compose.material3)
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.navigation.compose)
     implementation(libs.androidx.datastore.preferences)
     implementation(libs.androidx.work.runtime)
+    implementation(libs.kotlinx.serialization.json)
+    implementation(libs.androidx.documentfile)
+
+    // Material Icons
+    implementation("androidx.compose.material:material-icons-core:1.7.0")
+    implementation("androidx.compose.material:material-icons-extended:1.7.0")
 
     // Room is ready for feature-owned entities and DAOs; no empty schema is created.
     implementation(libs.androidx.room.runtime)
@@ -56,10 +65,17 @@ dependencies {
     implementation(libs.androidx.media3.session)
     implementation(libs.androidx.media3.inspector)
 
+    // Glance for the now-playing home screen widget
+    implementation(libs.androidx.glance.appwidget)
+
+    // Sherpa-ONNX for neural TTS (AAR not on Maven Central - add local AAR when available)
+    // implementation(libs.sherpa.onnx)
+
     debugImplementation(libs.androidx.compose.ui.tooling)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
 
     testImplementation(libs.junit)
+    testImplementation(libs.kotlinx.coroutines.test)
     androidTestImplementation(libs.androidx.test.core)
     androidTestImplementation(libs.androidx.test.runner)
     androidTestImplementation(libs.androidx.test.ext.junit)
