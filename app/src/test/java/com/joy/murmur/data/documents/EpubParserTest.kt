@@ -49,6 +49,32 @@ class EpubParserTest {
     }
 
     @Test
+    fun epubXmlRejectsDoctypeAndExternalEntityDeclarations() {
+        val hostileXml = """
+            <!DOCTYPE package [<!ENTITY external SYSTEM "file:///private/secret">]>
+            <package>&external;</package>
+        """.trimIndent().toByteArray()
+
+        assertThrows(Exception::class.java) { EpubParser.parseXml(hostileXml) }
+    }
+
+    @Test
+    fun archiveRejectsAnOversizedChapterEntry() {
+        val archiveBytes = ByteArrayOutputStream().use { bytes ->
+            ZipOutputStream(bytes).use { zip ->
+                zip.putNextEntry(ZipEntry("chapter.xhtml"))
+                zip.write(ByteArray(EpubParser.MAX_CHAPTER_BYTES.toInt() + 1) { 'x'.code.toByte() })
+                zip.closeEntry()
+            }
+            bytes.toByteArray()
+        }
+
+        assertThrows(IllegalArgumentException::class.java) {
+            ZipInputStream(ByteArrayInputStream(archiveBytes)).use(EpubParser::readEpubEntries)
+        }
+    }
+
+    @Test
     fun archiveEntryCountIsBoundedEvenWhenEntriesAreEmpty() {
         val archiveBytes = ByteArrayOutputStream().use { bytes ->
             ZipOutputStream(bytes).use { zip ->

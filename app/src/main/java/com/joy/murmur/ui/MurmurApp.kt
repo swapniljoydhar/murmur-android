@@ -12,6 +12,7 @@ import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -66,8 +67,12 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.navigation.NavHostController
@@ -939,6 +944,8 @@ private fun ReaderScreen(
     var searching by remember(documentId) { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var loading by remember { mutableStateOf(false) }
+    var checkingSource by remember(documentId) { mutableStateOf(true) }
+    var sourceChanged by remember(documentId) { mutableStateOf(false) }
     var synthesizing by remember { mutableStateOf(false) }
     var speechError by remember { mutableStateOf<String?>(null) }
     var voiceNetworkRequirement by remember { mutableStateOf(VoiceNetworkRequirement.UNKNOWN) }
@@ -1010,9 +1017,23 @@ private fun ReaderScreen(
     }
 
     LaunchedEffect(repository) { repository?.observeDocuments()?.collect { documents = it } }
+    LaunchedEffect(repository, documentId) {
+        checkingSource = true
+        sourceChanged = false
+        try {
+            sourceChanged = repository?.validateDocumentSource(documentId) ?: false
+            if (sourceChanged) position = 0L
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            sourceChanged = false
+        } finally {
+            checkingSource = false
+        }
+    }
     LaunchedEffect(document?.id, document?.positionChars) {
         val savedPosition = document?.positionChars ?: return@LaunchedEffect
-        if (position == null || position != savedPosition) position = savedPosition
+        if (!sourceChanged && (position == null || position != savedPosition)) position = savedPosition
     }
     LaunchedEffect(repository, documentId) { repository?.observeBookmarks(documentId)?.collect { bookmarks = it } }
     LaunchedEffect(speechGenerator, selectedSpeechVoice, strictOffline) {
@@ -1026,10 +1047,10 @@ private fun ReaderScreen(
             speechError = failure.message ?: "System speech isn't available on this device."
         }
     }
-    LaunchedEffect(repository, document?.uri, position) {
+    LaunchedEffect(repository, document?.uri, position, checkingSource) {
         val current = document
         val start = position
-        if (repository != null && current != null && start != null) {
+        if (!checkingSource && repository != null && current != null && start != null) {
             loading = true
             error = null
             try {
@@ -1064,6 +1085,13 @@ private fun ReaderScreen(
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        if (sourceChanged) {
+            Text(
+                "This document or its saved position format changed. Reading restarted at the beginning; saved bookmarks were kept and may need review.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
         if (document?.mimeType == "application/epub+zip") {
             TextButton(
                 enabled = !loadingEpubContents && repository != null,
@@ -1263,6 +1291,38 @@ private fun ReaderScreen(
                             titleSmall = type.titleSmall.copy(fontSize = type.titleSmall.fontSize * readerTextScale),
                         ),
                     ) { MarkdownReaderContent(page) }
+                } else if (document?.mimeType == "text/plain") {
+                    val pageStart = position ?: document.positionChars
+                    var textLayout by remember(page) { mutableStateOf<TextLayoutResult?>(null) }
+                    Text(
+                        "Tap text to set a reading position, then choose Read from here.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        text = page,
+                        modifier = Modifier
+                            .pointerInput(page, pageStart) {
+                                detectTapGestures { tapOffset ->
+                                    val offset = textLayout?.getOffsetForPosition(tapOffset) ?: return@detectTapGestures
+                                    previousPages.clear()
+                                    position = pageStart + offset.coerceIn(0, page.lastIndex)
+                                }
+                            }
+                            .semantics {
+                                onClick(label = "Set reading position to the beginning of this passage") {
+                                    previousPages.clear()
+                                    position = pageStart
+                                    true
+                                }
+                            },
+                        style = MaterialTheme.typography.bodyLarge.copy(
+                            color = MaterialTheme.colorScheme.onSurface,
+                            fontSize = MaterialTheme.typography.bodyLarge.fontSize * readerTextScale,
+                            lineHeight = MaterialTheme.typography.bodyLarge.lineHeight * readerTextScale * 1.45f,
+                        ),
+                        onTextLayout = { textLayout = it },
+                    )
                 } else {
                     Text(
                         page,
@@ -1276,6 +1336,7 @@ private fun ReaderScreen(
         } else Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
             Text(
                 when {
+                    checkingSource -> "Checking document source…"
                     loading -> "Loading document…"
                     document == null -> "Choose a supported document from Documents."
                     error != null -> "The document is unavailable."

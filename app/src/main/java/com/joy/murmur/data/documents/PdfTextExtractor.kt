@@ -14,6 +14,7 @@ import kotlinx.coroutines.withContext
 /** PDF text support provided by Android 15 and later. */
 internal object PdfTextExtractor {
     private const val MAX_PDF_PAGES = 5_000
+    private const val MAX_PDF_PAGE_TEXT_CHARACTERS = 1_048_576
     private const val SNIPPET_RADIUS = 36
 
     suspend fun extractPageText(context: Context, uri: Uri, pageIndex: Int): String? {
@@ -45,13 +46,7 @@ internal object PdfTextExtractor {
             PdfRenderer(fileDescriptor).use { renderer ->
                 if (pageIndex !in 0 until renderer.pageCount) return null
                 renderer.openPage(pageIndex).use { page ->
-                    page.textContents
-                        .asSequence()
-                        .map { it.text }
-                        .filter(String::isNotBlank)
-                        .joinToString(" ")
-                        .trim()
-                        .takeIf(String::isNotEmpty)
+                    extractBoundedPageText(page)
                 }
             }
         }
@@ -72,14 +67,12 @@ internal object PdfTextExtractor {
                     "PDF text search is limited to $MAX_PDF_PAGES pages."
                 }
                 val matches = mutableListOf<DocumentSearchMatch>()
+                var sawExtractableText = false
                 for (pageIndex in 0 until renderer.pageCount) {
                     currentCoroutineContext().ensureActive()
                     renderer.openPage(pageIndex).use { page ->
-                        val text = page.textContents
-                            .asSequence()
-                            .map { it.text }
-                            .filter(String::isNotBlank)
-                            .joinToString(" ")
+                        val text = extractBoundedPageText(page).orEmpty()
+                        sawExtractableText = sawExtractableText || text.isNotBlank()
                         var searchFrom = 0
                         while (matches.size < limit) {
                             val index = text.indexOf(query, searchFrom, ignoreCase = true)
@@ -97,8 +90,24 @@ internal object PdfTextExtractor {
                     }
                     if (matches.size >= limit) break
                 }
+                require(sawExtractableText) { "This PDF has no extractable text. Scanned PDFs aren't supported." }
                 matches
             }
         }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.VANILLA_ICE_CREAM)
+    private fun extractBoundedPageText(page: PdfRenderer.Page): String? {
+        val text = StringBuilder()
+        page.textContents.forEach { content ->
+            if (content.text.isBlank()) return@forEach
+            val separatorLength = if (text.isEmpty()) 0 else 1
+            require(text.length + separatorLength + content.text.length <= MAX_PDF_PAGE_TEXT_CHARACTERS) {
+                "PDF page text exceeds Murmur's 1 MB per-page limit."
+            }
+            if (separatorLength != 0) text.append(' ')
+            text.append(content.text)
+        }
+        return text.toString().trim().takeIf(String::isNotEmpty)
     }
 }
