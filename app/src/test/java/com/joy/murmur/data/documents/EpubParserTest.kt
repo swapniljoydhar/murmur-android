@@ -33,6 +33,15 @@ class EpubParserTest {
     }
 
     @Test
+    fun chapterOffsetsMatchReaderSeparatorsAndSkipEmptyChapters() {
+        val offsets = EpubParser.epubChapterPositions(
+            listOf("one.xhtml" to "A", "empty.xhtml" to "  ", "two.xhtml" to "B"),
+        )
+
+        assertEquals(mapOf("one.xhtml" to 0L, "two.xhtml" to 3L), offsets)
+    }
+
+    @Test
     fun resolveZipPathRejectsTraversalOutsideArchive() {
         assertThrows(IllegalArgumentException::class.java) {
             EpubParser.resolveZipPath("OEBPS/content.opf", "../../outside.xhtml")

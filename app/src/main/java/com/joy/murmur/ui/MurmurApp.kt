@@ -93,6 +93,7 @@ import com.joy.murmur.domain.documents.DocumentLibraryRepository
 import com.joy.murmur.domain.documents.ReaderDocument
 import com.joy.murmur.domain.documents.PdfPage
 import com.joy.murmur.domain.documents.DocumentSearchMatch
+import com.joy.murmur.data.documents.TocEntry
 import com.joy.murmur.data.speech.SystemTtsSpeechGenerator
 import com.joy.murmur.data.speech.SpeechVoiceOption
 import com.joy.murmur.data.speech.VoiceNetworkRequirement
@@ -947,6 +948,10 @@ private fun ReaderScreen(
     val document = documents.firstOrNull { it.id == documentId }
     val documentReadAloudFailure = readAloudFailure?.takeIf { it.documentId == documentId }
     var bookmarks by remember { mutableStateOf<List<com.joy.murmur.domain.documents.ReaderBookmark>>(emptyList()) }
+    var epubContents by remember(documentId) { mutableStateOf<List<TocEntry>>(emptyList()) }
+    var showEpubContents by remember(documentId) { mutableStateOf(false) }
+    var loadingEpubContents by remember(documentId) { mutableStateOf(false) }
+    var epubContentsError by remember(documentId) { mutableStateOf<String?>(null) }
 
     fun startReadAloud(continuous: Boolean) {
         val currentDocument = document ?: return
@@ -1057,6 +1062,33 @@ private fun ReaderScreen(
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        if (document?.mimeType == "application/epub+zip") {
+            TextButton(
+                enabled = !loadingEpubContents && repository != null,
+                onClick = {
+                    if (epubContents.isNotEmpty()) {
+                        showEpubContents = true
+                    } else {
+                        scope.launch {
+                            loadingEpubContents = true
+                            epubContentsError = null
+                            try {
+                                epubContents = repository?.getEpubToc(documentId).orEmpty()
+                                if (epubContents.isEmpty()) epubContentsError = "This EPUB has no readable contents list."
+                                else showEpubContents = true
+                            } catch (cancelled: CancellationException) {
+                                throw cancelled
+                            } catch (failure: Exception) {
+                                epubContentsError = failure.message ?: "Murmur couldn't load this book's contents."
+                            } finally {
+                                loadingEpubContents = false
+                            }
+                        }
+                    }
+                },
+            ) { Text(if (loadingEpubContents) "Loading contents…" else "Contents") }
+            epubContentsError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+        }
         if (document?.mimeType != "application/pdf" || Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM) {
             if (document?.mimeType != "application/pdf") {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
@@ -1320,6 +1352,37 @@ private fun ReaderScreen(
                 }
             },
             confirmButton = { TextButton(onClick = { showVoicePicker = false }) { Text("Done") } },
+        )
+    }
+    if (showEpubContents) {
+        AlertDialog(
+            onDismissRequest = { showEpubContents = false },
+            title = { Text("Contents") },
+            text = {
+                Column(Modifier.fillMaxWidth().height(360.dp).verticalScroll(rememberScrollState())) {
+                    epubContents.forEach { entry ->
+                        TextButton(
+                            onClick = {
+                                entry.positionChars?.let { target ->
+                                    previousPages.clear()
+                                    position = target
+                                }
+                                showEpubContents = false
+                            },
+                            enabled = entry.positionChars != null,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text(
+                                entry.title,
+                                modifier = Modifier.fillMaxWidth().padding(start = ((entry.level - 1).coerceAtLeast(0) * 16).dp),
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { showEpubContents = false }) { Text("Close") } },
         )
     }
 }
