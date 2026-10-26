@@ -108,7 +108,17 @@ class RoomDocumentLibraryRepository(context: Context, private val store: ReaderD
     }
 
     override suspend fun readPage(document: ReaderDocument, startChar: Long, maxChars: Int): String = withContext(Dispatchers.IO) {
-        require(document.mimeType != "application/pdf") { "PDF pages are rendered as images and do not contain extracted text yet." }
+        if (document.mimeType == "application/pdf") {
+            val pageIndex = startChar.coerceIn(0L, Int.MAX_VALUE.toLong()).toInt()
+            return@withContext extractPdfPageText(document, pageIndex)
+                ?: throw IllegalArgumentException(
+                    if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.VANILLA_ICE_CREAM) {
+                        "PDF text reading requires Android 15 (API 35) or newer."
+                    } else {
+                        "This PDF page has no extractable text. Scanned PDFs are not supported."
+                    }
+                )
+        }
         if (document.mimeType == "text/html") return@withContext readHtmlPage(document, startChar, maxChars)
         if (document.mimeType == "application/epub+zip") return@withContext readEpubPage(document.uri, startChar, maxChars)
         val input = appContext.contentResolver.openInputStream(document.uri) ?: throw IllegalStateException("Document is no longer available")
@@ -174,24 +184,7 @@ class RoomDocumentLibraryRepository(context: Context, private val store: ReaderD
 
     override suspend fun extractPdfPageText(document: ReaderDocument, pageIndex: Int): String? = withContext(Dispatchers.IO) {
         require(document.mimeType == "application/pdf") { "This document isn't a PDF." }
-        
-        // Use PdfTextExtractor (API 29+) for text extraction
-        val text = PdfTextExtractor.extractPageText(appContext, document.uri, pageIndex)
-        if (text != null) return@withContext text
-        
-        // Fallback: return empty string for older API levels
-        val descriptor = appContext.contentResolver.openFileDescriptor(document.uri, "r")
-            ?: throw IllegalStateException("This PDF is no longer available.")
-        descriptor.use { parcel ->
-            PdfRenderer(parcel).use { renderer ->
-                require(renderer.pageCount > 0) { "This PDF doesn't contain any pages." }
-                val safePageIndex = pageIndex.coerceIn(0, renderer.pageCount - 1)
-                renderer.openPage(safePageIndex).use { page ->
-                    // Text extraction not available on this API level
-                    ""
-                }
-            }
-        }
+        PdfTextExtractor.extractPageText(appContext, document.uri, pageIndex)
     }
 
     override suspend fun searchDocument(document: ReaderDocument, query: String, limit: Int): List<DocumentSearchMatch> = withContext(Dispatchers.IO) {
@@ -200,10 +193,8 @@ class RoomDocumentLibraryRepository(context: Context, private val store: ReaderD
         val safeLimit = limit.coerceIn(1, 100)
         when (document.mimeType) {
             "application/pdf" -> {
-                // Use PdfTextExtractor (API 29+) for search
-                val text = PdfTextExtractor.extractAllText(appContext, document.uri)
-                if (text != null) searchText(text, needle, safeLimit)
-                else throw IllegalArgumentException("PDF text search requires Android 10 (API 29) or higher.")
+                PdfTextExtractor.searchDocument(appContext, document.uri, needle, safeLimit)
+                    ?: throw IllegalArgumentException("PDF text search requires Android 15 (API 35) or newer.")
             }
             "text/html" -> searchText(readHtmlText(document.uri), needle, safeLimit)
             "application/epub+zip" -> searchText(readEpubText(document.uri), needle, safeLimit)
@@ -259,7 +250,8 @@ class RoomDocumentLibraryRepository(context: Context, private val store: ReaderD
     }
 
     private suspend fun readEpubText(uri: Uri): String {
-        val archiveEntries = EpubParser.readEntries(appContext, uri)
+        val coroutineContext = currentCoroutineContext()
+        val archiveEntries = EpubParser.readEntries(appContext, uri) { coroutineContext.ensureActive() }
         val container = archiveEntries["META-INF/container.xml"]
             ?: throw IllegalArgumentException("This EPUB is missing its package information.")
         val containerXml = EpubParser.parseXml(container)
@@ -369,10 +361,11 @@ class RoomDocumentLibraryRepository(context: Context, private val store: ReaderD
     }
 
     override suspend fun getEpubToc(documentId: String): List<TocEntry> = withContext(Dispatchers.IO) {
+        val coroutineContext = currentCoroutineContext()
         val document = store.getDocument(documentId) ?: throw IllegalArgumentException("Document not found")
         require(document.mimeType == "application/epub+zip") { "Document is not an EPUB" }
         val uri = Uri.parse(document.uri)
-        val entries = EpubParser.readEntries(appContext, uri)
+        val entries = EpubParser.readEntries(appContext, uri) { coroutineContext.ensureActive() }
         val container = entries["META-INF/container.xml"]
             ?: throw IllegalArgumentException("This EPUB is missing its package information.")
         val containerXml = EpubParser.parseXml(container)

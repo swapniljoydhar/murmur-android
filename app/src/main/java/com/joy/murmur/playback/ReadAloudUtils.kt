@@ -103,12 +103,33 @@ object ReadAloudUtils {
             .replace("%5D", "]")
     }
 
-    fun markdownForSpeech(source: String): String = source
-        .replace(Regex("```[\\s\\S]*?```"), " ")
-        .replace(Regex("!\\[([^]]*)]\\([^)]+\\)"), "$1")
-        .replace(Regex("\\[([^]]+)]\\([^)]+\\)"), "$1")
-        .replace(Regex("(?m)^\\s{0,3}#{1,6}\\s*"), "")
-        .replace(Regex("(?m)^\\s*(?:[-*+]\\s+|\\d+[.)]\\s+)"), "")
-        .replace(Regex("(?m)^\\s*>\\s?"), "")
-        .replace(Regex("[*_~`]"), "")
+    /**
+     * Removes Markdown syntax without changing character indexes. Speech chunk offsets
+     * are persisted against the original document, so every replacement must preserve
+     * the source string's length.
+     */
+    fun markdownForSpeech(source: String): String {
+        var output = source
+            .replace(Regex("```[\\s\\S]*?```")) { " ".repeat(it.value.length) }
+            .replace(Regex("!\\[([^]]*)]\\([^)]+\\)")) { match ->
+                replaceMarkupWithLabel(match.value, labelStart = 2, labelLength = match.groups[1]?.value?.length ?: 0)
+            }
+            .replace(Regex("\\[([^]]+)]\\([^)]+\\)")) { match ->
+                replaceMarkupWithLabel(match.value, labelStart = 1, labelLength = match.groups[1]?.value?.length ?: 0)
+            }
+            .replace(Regex("(?m)^\\s{0,3}#{1,6}\\s*")) { " ".repeat(it.value.length) }
+            .replace(Regex("(?m)^\\s*(?:[-*+]\\s+|\\d+[.)]\\s+)")) { " ".repeat(it.value.length) }
+            .replace(Regex("(?m)^\\s*>\\s?")) { " ".repeat(it.value.length) }
+        output = output.map { char -> if (char in "*_~`") ' ' else char }.joinToString("")
+        check(output.length == source.length) { "Markdown speech cleanup must preserve source offsets" }
+        return output
+    }
+
+    private fun replaceMarkupWithLabel(markup: String, labelStart: Int, labelLength: Int): String {
+        val output = CharArray(markup.length) { ' ' }
+        val safeStart = labelStart.coerceIn(0, markup.length)
+        val safeEnd = (safeStart + labelLength).coerceIn(safeStart, markup.length)
+        markup.substring(safeStart, safeEnd).toCharArray().copyInto(output, safeStart)
+        return output.concatToString()
+    }
 }

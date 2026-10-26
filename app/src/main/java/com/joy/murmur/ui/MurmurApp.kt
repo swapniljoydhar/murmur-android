@@ -99,6 +99,9 @@ import com.joy.murmur.data.speech.VoiceNetworkRequirement
 import com.joy.murmur.playback.PlaybackContentType
 import com.joy.murmur.playback.PlaybackController
 import com.joy.murmur.playback.PlaybackSnapshot
+import com.joy.murmur.playback.ReadAloudStatus
+import com.joy.murmur.playback.parseReadAloudMediaId
+import com.joy.murmur.playback.SleepTimer
 import com.joy.murmur.playback.SelectedAudio
 import com.joy.murmur.playback.readAloudMediaId
 import com.joy.murmur.playback.markdownForSpeech
@@ -160,14 +163,6 @@ fun MurmurApp(
     val playback by (playbackController?.snapshot ?: androidx.compose.runtime.remember {
         kotlinx.coroutines.flow.MutableStateFlow(PlaybackSnapshot())
     }).collectAsState()
-    LaunchedEffect(playback.current?.id, documentLibraryRepository) {
-        val current = playback.current?.takeIf { it.contentType == PlaybackContentType.READ_ALOUD } ?: return@LaunchedEffect
-        val parts = current.id.split('|')
-        val documentId = parts.getOrNull(1)?.let(Uri::decode) ?: return@LaunchedEffect
-        val characterPosition = parts.getOrNull(2)?.toLongOrNull() ?: return@LaunchedEffect
-        documentLibraryRepository?.savePosition(documentId, characterPosition)
-    }
-
     MurmurTheme(appearanceMode = appearanceMode) {
         val navController = rememberNavController()
         val backStackEntry by navController.currentBackStackEntryAsState()
@@ -385,11 +380,12 @@ private fun MusicLibraryScreen(
         if (granted) scope.launch { loadLibrary() } else permissionDenied = true
     }
     val pickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
-        val selected = uris.map { uri ->
-            runCatching {
-                context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            }
+        val retainedUris = uris.filter { retainReadAccess(context.contentResolver, it) }
+        val selected = retainedUris.map { uri ->
             SelectedAudio(uri.toStableMediaId(), uri, queryDisplayName(context.contentResolver, uri), PlaybackContentType.MUSIC)
+        }
+        if (retainedUris.size < uris.size) {
+            error = "Skipped ${uris.size - retainedUris.size} files because Murmur couldn't retain access. Choose them again from a provider that supports ongoing access."
         }
         if (selected.isNotEmpty()) playbackController?.playSelected(selected)
     }
@@ -850,6 +846,14 @@ private enum class MusicBrowseTab(val label: String) {
 
 private fun MusicTrack.toSelectedAudio() = SelectedAudio(id, uri, title, PlaybackContentType.MUSIC, artist)
 
+private fun retainReadAccess(resolver: ContentResolver, uri: Uri): Boolean {
+    if (resolver.persistedUriPermissions.any { it.uri == uri && it.isReadPermission }) return true
+    return runCatching {
+        resolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        resolver.persistedUriPermissions.any { it.uri == uri && it.isReadPermission }
+    }.getOrDefault(false)
+}
+
 @Composable
 private fun DocumentLibraryScreen(repository: DocumentLibraryRepository?, onOpen: (ReaderDocument) -> Unit) {
     val context = LocalContext.current
@@ -862,12 +866,14 @@ private fun DocumentLibraryScreen(repository: DocumentLibraryRepository?, onOpen
         if (uris.isNotEmpty()) scope.launch {
             adding = true
             message = null
-            uris.forEach { uri ->
-                runCatching { context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
-            }
             try {
-                val added = repository?.addDocuments(uris) ?: 0
-                if (added < uris.size) message = "Added $added supported files. Murmur currently reads TXT, Markdown, HTML, and EPUB; PDF support is still being built."
+                val retainedUris = uris.filter { retainReadAccess(context.contentResolver, it) }
+                val added = repository?.addDocuments(retainedUris) ?: 0
+                message = when {
+                    retainedUris.size < uris.size -> "Added $added files. ${uris.size - retainedUris.size} couldn't be added because Murmur couldn't retain access. Choose those files again from a provider that supports ongoing access."
+                    added < retainedUris.size -> "Added $added supported files. Murmur supports TXT, Markdown, HTML, EPUB, and PDF text extraction on Android 15 or newer."
+                    else -> null
+                }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
@@ -888,7 +894,7 @@ private fun DocumentLibraryScreen(repository: DocumentLibraryRepository?, onOpen
             OutlinedCard(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("No documents yet", style = MaterialTheme.typography.titleLarge)
-                    Text("Choose a TXT, Markdown, HTML, or EPUB file to read. Murmur stores its access and reading place, not a copy of the file.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("Choose a TXT, Markdown, HTML, EPUB, or PDF file to read. PDF text extraction requires Android 15 or newer; Murmur stores access and reading place, not a copy of the file.", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         } else documents.forEach { document ->
@@ -920,6 +926,7 @@ private fun ReaderScreen(
     val strictOffline by settingsRepository.strictOfflineSpeech.collectAsState(initial = true)
     val readerTextScale by settingsRepository.readerTextScale.collectAsState(initial = 1f)
     val selectedSpeechVoice by settingsRepository.selectedSpeechVoice.collectAsState(initial = null)
+    val readAloudFailure by ReadAloudStatus.failure.collectAsState()
     var documents by remember { mutableStateOf<List<ReaderDocument>>(emptyList()) }
     var position by remember(documentId) { mutableStateOf<Long?>(null) }
     var page by remember { mutableStateOf("") }
@@ -938,11 +945,17 @@ private fun ReaderScreen(
     var showVoicePicker by remember { mutableStateOf(false) }
     val previousPages = remember(documentId) { mutableStateListOf<Long>() }
     val document = documents.firstOrNull { it.id == documentId }
+    val documentReadAloudFailure = readAloudFailure?.takeIf { it.documentId == documentId }
     var bookmarks by remember { mutableStateOf<List<com.joy.murmur.domain.documents.ReaderBookmark>>(emptyList()) }
 
     fun startReadAloud(continuous: Boolean) {
         val currentDocument = document ?: return
         val pageStart = position ?: 0L
+        val sourcePage = page
+        val playbackAtRequest = playbackController?.snapshot?.value
+        val queueIdsAtRequest = playbackAtRequest?.items?.map { it.id }
+        val currentIndexAtRequest = playbackAtRequest?.currentIndex
+        ReadAloudStatus.clearFailure(currentDocument.id)
         scope.launch {
             synthesizing = true
             speechError = null
@@ -971,7 +984,16 @@ private fun ReaderScreen(
                     )
                 }
                 if (items.isEmpty()) speechError = "There is no readable text on this page."
-                else playbackController?.playSelected(items)
+                else if ((position ?: 0L) != pageStart || page != sourcePage) {
+                    speechError = "The reading position changed while speech was being prepared. Start Read Aloud again."
+                } else if (playbackController != null) {
+                    val currentPlayback = playbackController.snapshot.value
+                    if (currentPlayback.items.map { it.id } != queueIdsAtRequest || currentPlayback.currentIndex != currentIndexAtRequest) {
+                        speechError = "Playback changed while speech was being prepared. Start Read Aloud again."
+                    } else {
+                        playbackController.playSelected(items)
+                    }
+                }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
@@ -983,7 +1005,10 @@ private fun ReaderScreen(
     }
 
     LaunchedEffect(repository) { repository?.observeDocuments()?.collect { documents = it } }
-    LaunchedEffect(document?.id) { if (position == null && document != null) position = document.positionChars }
+    LaunchedEffect(document?.id, document?.positionChars) {
+        val savedPosition = document?.positionChars ?: return@LaunchedEffect
+        if (position == null || position != savedPosition) position = savedPosition
+    }
     LaunchedEffect(repository, documentId) { repository?.observeBookmarks(documentId)?.collect { bookmarks = it } }
     LaunchedEffect(speechGenerator, selectedSpeechVoice) {
         runCatching {
@@ -1002,10 +1027,12 @@ private fun ReaderScreen(
             error = null
             try {
                 if (current.mimeType == "application/pdf") {
-                    page = ""
-                    val rendered = repository.renderPdfPage(current, start.toInt().coerceAtLeast(0), 1440)
+                    val pageIndex = start.coerceIn(0L, Int.MAX_VALUE.toLong()).toInt()
+                    val rendered = repository.renderPdfPage(current, pageIndex, 1440)
+                    page = repository.extractPdfPageText(current, rendered.pageIndex).orEmpty()
                     pdfPage = rendered
                     repository.savePosition(current.id, rendered.pageIndex.toLong())
+                    if (start != rendered.pageIndex.toLong()) position = rendered.pageIndex.toLong()
                 } else {
                     pdfPage = null
                     page = repository.readPage(current, start)
@@ -1030,19 +1057,21 @@ private fun ReaderScreen(
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        if (document?.mimeType != "application/pdf") {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-                Text("Text size", style = MaterialTheme.typography.labelLarge)
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    TextButton(
-                        onClick = { scope.launch { settingsRepository.setReaderTextScale(readerTextScale - 0.1f) } },
-                        enabled = readerTextScale > 0.8f,
-                    ) { Text("A−") }
-                    Text("${(readerTextScale * 100).toInt()}%", style = MaterialTheme.typography.labelMedium)
-                    TextButton(
-                        onClick = { scope.launch { settingsRepository.setReaderTextScale(readerTextScale + 0.1f) } },
-                        enabled = readerTextScale < 1.6f,
-                    ) { Text("A+") }
+        if (document?.mimeType != "application/pdf" || Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM) {
+            if (document?.mimeType != "application/pdf") {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("Text size", style = MaterialTheme.typography.labelLarge)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        TextButton(
+                            onClick = { scope.launch { settingsRepository.setReaderTextScale(readerTextScale - 0.1f) } },
+                            enabled = readerTextScale > 0.8f,
+                        ) { Text("A−") }
+                        Text("${(readerTextScale * 100).toInt()}%", style = MaterialTheme.typography.labelMedium)
+                        TextButton(
+                            onClick = { scope.launch { settingsRepository.setReaderTextScale(readerTextScale + 0.1f) } },
+                            enabled = readerTextScale < 1.6f,
+                        ) { Text("A+") }
+                    }
                 }
             }
             TextButton(onClick = {
@@ -1100,7 +1129,28 @@ private fun ReaderScreen(
         }
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             if (document?.mimeType == "application/pdf") {
-                Text("PDF Read Aloud isn't available yet.", Modifier.weight(1f), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (page.isNotBlank()) {
+                    Button(
+                        modifier = Modifier.weight(1f),
+                        enabled = !loading && !synthesizing && playbackController != null,
+                        onClick = { startReadAloud(continuous = true) },
+                    ) { Text(if (synthesizing) "Preparing speech…" else "Read from here") }
+                    OutlinedButton(
+                        modifier = Modifier.weight(1f),
+                        enabled = !loading && !synthesizing && playbackController != null,
+                        onClick = { startReadAloud(continuous = false) },
+                    ) { Text("This page") }
+                } else {
+                    Text(
+                        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.VANILLA_ICE_CREAM) {
+                            "PDF text reading needs Android 15 or newer."
+                        } else {
+                            "This page has no extractable text. Scanned PDFs aren't supported."
+                        },
+                        Modifier.weight(1f),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             } else {
                 Button(
                     modifier = Modifier.weight(1f),
@@ -1117,7 +1167,7 @@ private fun ReaderScreen(
                 val current = document ?: return@OutlinedButton
                 val at = position ?: current.positionChars
                 scope.launch { repository?.addBookmark(current.id, at, "Page ${at + 1}") }
-            }, enabled = document != null && repository != null && !loading) { Text("Bookmark") }
+            }, enabled = repository != null && !loading) { Text("Bookmark") }
         }
         if (document?.mimeType != "application/pdf") TextButton(
             onClick = {
@@ -1127,7 +1177,7 @@ private fun ReaderScreen(
             },
             enabled = document != null && repository != null && !loading,
         ) { Text("Bookmark this position") }
-        if (document?.mimeType != "application/pdf") Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        if (document?.mimeType != "application/pdf" || page.isNotBlank()) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text("Strict Offline Speech", style = MaterialTheme.typography.titleSmall)
                 Text(
@@ -1146,6 +1196,13 @@ private fun ReaderScreen(
             Switch(checked = strictOffline, onCheckedChange = { enabled -> scope.launch { settingsRepository.setStrictOfflineSpeech(enabled) } })
         }
         speechError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+        documentReadAloudFailure?.let { failure ->
+            Text(failure.message, color = MaterialTheme.colorScheme.error)
+            TextButton(
+                onClick = { startReadAloud(continuous = true) },
+                enabled = page.isNotBlank() && !loading && !synthesizing && playbackController != null,
+            ) { Text("Retry Read Aloud from this position") }
+        }
         error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
         if (document?.mimeType == "application/pdf" && pdfPage != null) {
             val image = remember(pdfPage) {
@@ -1422,16 +1479,17 @@ private fun AudiobookLibraryScreen(
 
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isNotEmpty()) {
-            uris.forEach { uri ->
-                runCatching {
-                    context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                }
-            }
             scope.launch {
                 adding = true
                 error = null
                 try {
-                    repository?.addBooks(uris)
+                    val retainedUris = uris.filter { retainReadAccess(context.contentResolver, it) }
+                    val added = repository?.addBooks(retainedUris) ?: 0
+                    error = when {
+                        retainedUris.size < uris.size -> "Added $added audiobooks. ${uris.size - retainedUris.size} couldn't be added because Murmur couldn't retain access. Choose those files again from a provider that supports ongoing access."
+                        added < retainedUris.size -> "Added $added supported audiobooks. Some selected files weren't recognized as supported audio."
+                        else -> null
+                    }
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (_: Exception) {
@@ -1578,6 +1636,83 @@ private fun MiniPlayer(snapshot: PlaybackSnapshot, onOpen: () -> Unit, onToggle:
 }
 
 @Composable
+private fun SleepTimerControl(controller: PlaybackController?) {
+    val context = LocalContext.current
+    val preferences = remember(context) {
+        context.getSharedPreferences(SleepTimer.PREFERENCES_NAME, android.content.Context.MODE_PRIVATE)
+    }
+    var deadlineMs by remember(preferences) {
+        mutableStateOf(preferences.getLong(SleepTimer.PREFERENCE_END_TIME_MS, 0L))
+    }
+    var showDialog by remember { mutableStateOf(false) }
+    val remainingMs = (deadlineMs - System.currentTimeMillis()).coerceAtLeast(0L)
+
+    LaunchedEffect(preferences) {
+        while (true) {
+            deadlineMs = preferences.getLong(SleepTimer.PREFERENCE_END_TIME_MS, 0L)
+            kotlinx.coroutines.delay(1_000L)
+        }
+    }
+
+    Row(
+        Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(
+            if (remainingMs > 0L) {
+                val totalSeconds = (remainingMs + 999L) / 1_000L
+                val minutes = totalSeconds / 60L
+                val seconds = (totalSeconds % 60L).toString().padStart(2, '0')
+                "Sleep timer · $minutes:$seconds left"
+            } else {
+                "Sleep timer off"
+            },
+            Modifier.weight(1f),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        TextButton(onClick = { showDialog = true }, enabled = controller != null) { Text("Set") }
+        if (remainingMs > 0L) {
+            TextButton(onClick = { controller?.cancelSleepTimer(); deadlineMs = 0L }) { Text("Cancel") }
+        }
+    }
+
+    if (showDialog) {
+        AlertDialog(
+            onDismissRequest = { showDialog = false },
+            title = { Text("Sleep timer") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("Pause playback after:", style = MaterialTheme.typography.bodyMedium)
+                    SleepTimer.PRESET_MINUTES.forEach { minutes ->
+                        TextButton(
+                            onClick = {
+                                controller?.startSleepTimer(minutes)
+                                deadlineMs = System.currentTimeMillis() + minutes.toLong() * SleepTimer.MILLIS_PER_MINUTE
+                                showDialog = false
+                            },
+                            enabled = controller != null,
+                        ) { Text("$minutes minutes") }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        controller?.cancelSleepTimer()
+                        deadlineMs = 0L
+                        showDialog = false
+                    },
+                    enabled = remainingMs > 0L,
+                ) { Text("Cancel timer") }
+            },
+            dismissButton = { TextButton(onClick = { showDialog = false }) { Text("Close") } },
+        )
+    }
+}
+
+@Composable
 private fun NowPlayingScreen(
     snapshot: PlaybackSnapshot,
     controller: PlaybackController?,
@@ -1608,6 +1743,7 @@ private fun NowPlayingScreen(
     ) {
         Text(current.title, style = MaterialTheme.typography.headlineSmall)
         Text(current.contentType.displayName, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        SleepTimerControl(controller)
         Slider(
             value = snapshot.positionMs.coerceIn(0L, snapshot.durationMs.coerceAtLeast(1L)).toFloat(),
             onValueChange = { controller?.seekTo(it.toLong()) },
@@ -1642,6 +1778,11 @@ private fun NowPlayingScreen(
 @Composable
 private fun ReadAloudPlayerScreen(snapshot: PlaybackSnapshot, controller: PlaybackController?, onReturnToDocument: () -> Unit) {
     val current = snapshot.current ?: return
+    val failure by ReadAloudStatus.failure.collectAsState()
+    val currentDocumentId = parseReadAloudMediaId(current.id)?.documentId
+        ?: current.id.takeIf { it.startsWith("read_aloud_start|") }
+            ?.split('|')?.getOrNull(1)?.let(Uri::decode)
+    val currentFailure = failure?.takeIf { it.documentId == currentDocumentId }
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 24.dp, vertical = 28.dp),
         verticalArrangement = Arrangement.spacedBy(18.dp),
@@ -1650,6 +1791,11 @@ private fun ReadAloudPlayerScreen(snapshot: PlaybackSnapshot, controller: Playba
         Text("READ ALOUD", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
         Text(current.title, style = MaterialTheme.typography.headlineSmall, maxLines = 3, overflow = TextOverflow.Ellipsis)
         Text("Speech from the open document", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        SleepTimerControl(controller)
+        currentFailure?.let {
+            Text(it.message, color = MaterialTheme.colorScheme.error)
+            Text("Return to the document to retry from the saved position.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
         Slider(
             value = snapshot.positionMs.coerceIn(0L, snapshot.durationMs.coerceAtLeast(1L)).toFloat(),
             onValueChange = { controller?.seekTo(it.toLong()) },
@@ -1701,6 +1847,7 @@ private fun AudiobookPlayerScreen(
             Text(current.title, style = MaterialTheme.typography.headlineSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
             current.subtitle?.let { Text(it, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant) }
         }
+        SleepTimerControl(controller)
         Column(Modifier.fillMaxWidth()) {
             Slider(
                 value = snapshot.positionMs.coerceIn(0L, duration).toFloat(),

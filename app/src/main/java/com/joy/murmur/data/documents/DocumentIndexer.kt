@@ -5,11 +5,14 @@ import android.graphics.pdf.PdfRenderer
 import android.net.Uri
 import android.os.Build
 import android.os.ParcelFileDescriptor
+import androidx.annotation.RequiresApi
 import android.text.Html
 import com.joy.murmur.data.playback.ReaderDocumentEntity
 import com.joy.murmur.domain.documents.DocumentStructure
 import com.joy.murmur.domain.documents.Section
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
@@ -75,7 +78,8 @@ class DocumentIndexer(private val context: Context) {
 
     private suspend fun indexEpub(uriString: String): Pair<String, List<Section>> = withContext(Dispatchers.IO) {
         val uri = Uri.parse(uriString)
-        val entries = EpubParser.readEntries(context, uri)
+        val coroutineContext = currentCoroutineContext()
+        val entries = EpubParser.readEntries(context, uri) { coroutineContext.ensureActive() }
         val container = entries["META-INF/container.xml"]
             ?: throw IllegalArgumentException("This EPUB is missing its package information.")
         val containerXml = EpubParser.parseXml(container)
@@ -104,6 +108,7 @@ class DocumentIndexer(private val context: Context) {
         val output = StringBuilder()
         
         chapterPaths.forEachIndexed { index, path ->
+            coroutineContext.ensureActive()
             val chapter = entries[path] ?: return@forEachIndexed
             val text = htmlToPlainText(chapter.toString(StandardCharsets.UTF_8))
             if (text.isBlank()) return@forEachIndexed
@@ -124,21 +129,33 @@ class DocumentIndexer(private val context: Context) {
     }
 
     private suspend fun indexPdf(uriString: String): Pair<String, List<Section>> = withContext(Dispatchers.IO) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.VANILLA_ICE_CREAM) {
+            return@withContext "" to emptyList()
+        }
         val uri = Uri.parse(uriString)
         val descriptor = context.contentResolver.openFileDescriptor(uri, "r")
             ?: throw IllegalStateException("PDF unavailable.")
         descriptor.use { parcel ->
             PdfRenderer(parcel).use { renderer ->
-                val pageCount = renderer.pageCount.coerceIn(1, MAX_PDF_PAGES)
+                require(renderer.pageCount in 1..MAX_PDF_PAGES) {
+                    "PDF indexing is limited to $MAX_PDF_PAGES pages."
+                }
+                val pageCount = renderer.pageCount
                 val sections = mutableListOf<Section>()
                 val output = StringBuilder()
                 var charOffset = 0L
                 
                 for (i in 0 until pageCount) {
+                    kotlinx.coroutines.currentCoroutineContext().ensureActive()
                     val page = renderer.openPage(i)
                     try {
                         val pageText = extractPageText(page)
                         if (pageText.isNotBlank()) {
+                            if (output.length + pageText.length + 2 > MAX_TEXT_CHARACTERS) {
+                                throw IllegalArgumentException(
+                                    "PDF text exceeds the ${MAX_TEXT_CHARACTERS / 1024 / 1024} MB text limit."
+                                )
+                            }
                             val pageTitle = "Page ${i + 1}"
                             val startChar = charOffset
                             output.append(pageText).append("\n\n")
@@ -161,19 +178,23 @@ class DocumentIndexer(private val context: Context) {
         }
     }
 
-    private fun extractPageText(page: PdfRenderer.Page): String {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            return try {
-                val method = PdfRenderer.Page::class.java.getMethod("getText")
-                method.invoke(page) as? String ?: ""
-            } catch (e: Exception) {
-                ""
-            }
+    private fun extractPageText(page: PdfRenderer.Page): String =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM) {
+            extractPageTextApi35(page)
+        } else {
+            ""
         }
-        return ""
-    }
+
+    @RequiresApi(Build.VERSION_CODES.VANILLA_ICE_CREAM)
+    private fun extractPageTextApi35(page: PdfRenderer.Page): String = page.textContents
+        .asSequence()
+        .map { it.text }
+        .filter(String::isNotBlank)
+        .joinToString(" ")
+        .trim()
 
     private suspend fun readText(uriString: String): String = withContext(Dispatchers.IO) {
+        val coroutineContext = currentCoroutineContext()
         val uri = Uri.parse(uriString)
         val input = context.contentResolver.openInputStream(uri)
             ?: throw IllegalStateException("Document is no longer available")
@@ -187,6 +208,7 @@ class DocumentIndexer(private val context: Context) {
                 val output = StringBuilder()
                 val buffer = CharArray(8192)
                 while (true) {
+                    coroutineContext.ensureActive()
                     val read = reader.read(buffer)
                     if (read < 0) break
                     if (output.length + read > MAX_TEXT_CHARACTERS) {

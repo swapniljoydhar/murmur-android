@@ -7,6 +7,7 @@ import androidx.annotation.OptIn
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.audio.AudioProcessor
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
@@ -20,6 +21,7 @@ import com.joy.murmur.playback.HeadroomLimiterProcessor
 import com.joy.murmur.playback.ReplayGainProcessor
 import com.joy.murmur.data.playback.PlaybackDatabase
 import com.joy.murmur.data.playback.PlaybackStore
+import com.joy.murmur.data.playback.PlaybackRestorePolicy
 import com.joy.murmur.data.playback.QueueItemEntity
 import com.joy.murmur.data.playback.ReaderDocumentStore
 import com.joy.murmur.data.documents.RoomDocumentLibraryRepository
@@ -35,6 +37,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -56,6 +59,7 @@ class PlaybackService : MediaSessionService() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val persistenceMutex = Mutex()
     private lateinit var player: ExoPlayer
+    private lateinit var sleepTimer: SleepTimer
     private lateinit var store: PlaybackStore
     private lateinit var replayGainProcessor: ReplayGainProcessor
     private lateinit var equalizerProcessor: EqualizerProcessor
@@ -66,6 +70,9 @@ class PlaybackService : MediaSessionService() {
     private var mediaSession: MediaSession? = null
     private var restorationComplete = false
     private var continuationJob: Job? = null
+    @Volatile private var continuationDocumentId: String? = null
+    @Volatile private var readAloudStartJob: Job? = null
+    @Volatile private var readAloudStartDocumentId: String? = null
     private val processors = mutableListOf<MurmurAudioProcessor>()
 
     // Single shared TTS generator instance
@@ -92,32 +99,94 @@ class PlaybackService : MediaSessionService() {
             androidx.media3.common.AudioAttributes.DEFAULT,
             true,
         )
+        sleepTimer = SleepTimer(this) { player.pause() }
         player.addListener(object : Player.Listener {
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-                val mediaId = mediaItem?.mediaId ?: return
+                val mediaId = mediaItem?.mediaId
+                if (mediaId == null) {
+                    cancelReadAloudWork()
+                    return
+                }
                 if (mediaId.startsWith("read_aloud_start")) {
-                    serviceScope.launch(Dispatchers.IO) {
-                        runCatching { startReadAloud(mediaId) }
+                    val documentId = mediaId.split('|').getOrNull(1)?.let(Uri::decode)
+                    cancelReadAloudWork()
+                    readAloudStartDocumentId = documentId
+                    documentId?.let(ReadAloudStatus::clearFailure)
+                    val job = serviceScope.launch(Dispatchers.IO) {
+                        try {
+                            startReadAloud(mediaId)
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (failure: Exception) {
+                            documentId?.let {
+                                ReadAloudStatus.reportFailure(it, failure.message ?: "Murmur couldn't start Read Aloud.")
+                            }
+                        }
+                    }
+                    readAloudStartJob = job
+                    job.invokeOnCompletion {
+                        if (readAloudStartJob === job) {
+                            readAloudStartJob = null
+                            readAloudStartDocumentId = null
+                        }
                     }
                     return
                 }
-                val segment = parseReadAloudMediaId(mediaId) ?: return
-                serviceScope.launch(Dispatchers.IO) {
-                    runCatching {
-                        ReaderDocumentStore(PlaybackDatabase.getInstance(this@PlaybackService))
-                            .savePosition(segment.documentId, segment.pageStart + segment.sourceOffset)
-                    }
+                val segment = parseReadAloudMediaId(mediaId)
+                if (segment == null) {
+                    cancelReadAloudWork()
+                    return
                 }
+                if (readAloudStartDocumentId != null && readAloudStartDocumentId != segment.documentId) {
+                    readAloudStartJob?.cancel()
+                    readAloudStartJob = null
+                    readAloudStartDocumentId = null
+                }
+                if (continuationDocumentId != null && continuationDocumentId != segment.documentId) {
+                    continuationJob?.cancel()
+                    continuationJob = null
+                    continuationDocumentId = null
+                }
+                serviceScope.launch(Dispatchers.IO) { runCatching { persistReadAloudPosition(segment) } }
                 updateReplayGainForCurrentTrack()
+            }
+
+            override fun onIsPlayingChanged(isPlaying: Boolean) {
+                if (!isPlaying) persistCurrentReadAloudPosition()
             }
 
             override fun onPlaybackStateChanged(playbackState: Int) {
                 if (playbackState != Player.STATE_ENDED) return
                 val mediaItem = player.currentMediaItem ?: return
                 val segment = parseReadAloudMediaId(mediaItem.mediaId) ?: return
-                if (!segment.continuous || segment.pageLength < READ_ALOUD_PAGE_SIZE || player.currentMediaItemIndex != player.mediaItemCount - 1) return
+                if (!segment.continuous || player.currentMediaItemIndex != player.mediaItemCount - 1) return
                 if (continuationJob?.isActive == true) return
-                continuationJob = serviceScope.launch { continueReadAloud(segment, mediaItem) }
+                continuationDocumentId = segment.documentId
+                val job = serviceScope.launch(Dispatchers.IO) { continueReadAloud(segment, mediaItem) }
+                continuationJob = job
+                job.invokeOnCompletion {
+                    if (continuationJob === job) {
+                        continuationJob = null
+                        continuationDocumentId = null
+                    }
+                }
+            }
+
+            override fun onPlayerError(error: PlaybackException) {
+                val segment = player.currentMediaItem?.mediaId?.let(::parseReadAloudMediaId) ?: return
+                serviceScope.launch(Dispatchers.IO) {
+                    try {
+                        persistReadAloudPosition(segment)
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (_: Exception) {
+                        // Keep the error visible even if the best-effort position write fails.
+                    }
+                    ReadAloudStatus.reportFailure(
+                        segment.documentId,
+                        "Read Aloud audio couldn't be played. Your position was preserved; return to the document to retry.",
+                    )
+                }
             }
 
             override fun onEvents(player: Player, events: Player.Events) {
@@ -130,12 +199,10 @@ class PlaybackService : MediaSessionService() {
             .build()
 
         serviceScope.launch(Dispatchers.IO) {
-            val savedPlayback = store.queue() to store.state()
+            val restorePlan = PlaybackRestorePolicy.plan(store.queue(), store.state())
             withContext(Dispatchers.Main.immediate) {
-                restoreQueue(savedPlayback.first, savedPlayback.second)
+                restoreQueue(restorePlan.queue, restorePlan.state)
                 restorationComplete = true
-                // Check if we need to restore Read Aloud state
-                maybeRestoreReadAloudState()
             }
         }
 
@@ -149,6 +216,14 @@ class PlaybackService : MediaSessionService() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val startResult = super.onStartCommand(intent, flags, startId)
+        when (intent?.action) {
+            ACTION_START_SLEEP_TIMER -> {
+                val minutes = intent.getIntExtra(EXTRA_SLEEP_TIMER_MINUTES, -1)
+                if (minutes in 1..SleepTimer.MAX_DURATION_MINUTES) sleepTimer.start(minutes)
+            }
+            ACTION_CANCEL_SLEEP_TIMER -> sleepTimer.cancel()
+        }
         intent?.getStringExtra("widget_action")?.let { action ->
             when (action) {
                 "play" -> if (!player.isPlaying) player.play()
@@ -158,7 +233,7 @@ class PlaybackService : MediaSessionService() {
             }
             WidgetManager.updateAllWidgets(this)
         }
-        return super.onStartCommand(intent, flags, startId)
+        return startResult
     }
 
     private fun updateReplayGainForCurrentTrack() {
@@ -171,10 +246,18 @@ class PlaybackService : MediaSessionService() {
         // Cancel all jobs first
         continuationJob?.cancel()
         continuationJob = null
+        continuationDocumentId = null
+        readAloudStartJob?.cancel()
+        readAloudStartJob = null
+        readAloudStartDocumentId = null
 
         // Persist final state synchronously
         val savedState = snapshotPlayerState()
-        runBlocking(Dispatchers.IO) { persistSnapshot(savedState) }
+        val readAloudSegment = player.currentMediaItem?.mediaId?.let(::parseReadAloudMediaId)
+        runBlocking(Dispatchers.IO) {
+            readAloudSegment?.let { runCatching { persistReadAloudPosition(it) } }
+            persistSnapshot(savedState)
+        }
 
         // Release media session and player
         mediaSession?.run {
@@ -191,6 +274,8 @@ class PlaybackService : MediaSessionService() {
         }
         processors.clear()
 
+        sleepTimer.shutdown()
+
         // Shutdown shared TTS generator
         ttsGenerator?.shutdown()
         ttsGenerator = null
@@ -200,9 +285,34 @@ class PlaybackService : MediaSessionService() {
     }
 
     // Get or create the shared TTS generator instance
+    @Synchronized
     private fun getTtsGenerator(): SystemTtsSpeechGenerator {
         return ttsGenerator ?: SystemTtsSpeechGenerator(this@PlaybackService).also { ttsGenerator = it }
     }
+
+    private suspend fun isCurrentMediaItem(mediaId: String): Boolean = withContext(Dispatchers.Main.immediate) {
+        player.currentMediaItem?.mediaId == mediaId
+    }
+
+    private suspend fun appendReadAloudItemsIfCurrent(expectedMediaId: String, items: List<MediaItem>): Boolean =
+        withContext(Dispatchers.Main.immediate) {
+            if (player.currentMediaItem?.mediaId != expectedMediaId) return@withContext false
+            val nextIndex = player.mediaItemCount
+            player.addMediaItems(items)
+            player.seekTo(nextIndex, 0L)
+            player.prepare()
+            player.play()
+            true
+        }
+
+    private suspend fun replaceReadAloudItemsIfCurrent(expectedMediaId: String, items: List<MediaItem>): Boolean =
+        withContext(Dispatchers.Main.immediate) {
+            if (player.currentMediaItem?.mediaId != expectedMediaId) return@withContext false
+            player.setMediaItems(items, 0, 0L)
+            player.prepare()
+            player.play()
+            true
+        }
 
     private fun restoreQueue(queue: List<QueueItemEntity>, saved: com.joy.murmur.data.playback.PlaybackStateEntity?) {
         if (queue.isEmpty()) return
@@ -247,37 +357,43 @@ class PlaybackService : MediaSessionService() {
         durationMs = snapshot.durationMs,
     )
 
-    /**
-     * Checks if the current queue has Read Aloud items and attempts to restore
-     * the TTS generation state if the process was interrupted during synthesis.
-     */
-    private fun maybeRestoreReadAloudState() {
-        val currentMediaId = player.currentMediaItem?.mediaId
-        val segment = currentMediaId?.let { parseReadAloudMediaId(it) }
-        
-        if (segment != null && segment.continuous) {
-            // Check if we're near the end of the queue (TTS might have been generating)
-            val currentIndex = player.currentMediaItemIndex
-            val itemsRemaining = player.mediaItemCount - currentIndex - 1
-            
-            // If we have few items left, we might have been interrupted during generation
-            if (itemsRemaining <= 2) {
-                serviceScope.launch(Dispatchers.IO) {
-                    runCatching { continueReadAloud(segment, player.currentMediaItem!!) }
-                }
-            }
+    private fun persistCurrentReadAloudPosition() {
+        val segment = player.currentMediaItem?.mediaId?.let(::parseReadAloudMediaId) ?: return
+        serviceScope.launch(Dispatchers.IO) { runCatching { persistReadAloudPosition(segment) } }
+    }
+
+    private fun cancelReadAloudWork() {
+        continuationJob?.cancel()
+        continuationJob = null
+        continuationDocumentId = null
+        readAloudStartJob?.cancel()
+        readAloudStartJob = null
+        readAloudStartDocumentId = null
+    }
+
+    private suspend fun persistReadAloudPosition(segment: ReadAloudSegmentInfo) {
+        val documents = ReaderDocumentStore(PlaybackDatabase.getInstance(this@PlaybackService))
+        val document = documents.getDocument(segment.documentId)
+        val position = if (document?.mimeType == "application/pdf") {
+            segment.pageStart
+        } else {
+            segment.pageStart + segment.sourceOffset
         }
+        documents.savePosition(segment.documentId, position)
     }
 
     private suspend fun continueReadAloud(segment: ReadAloudSegmentInfo, endedItem: MediaItem) {
-        val nextStart = segment.pageStart + segment.pageLength
         runCatching {
             val documentsStore = ReaderDocumentStore(PlaybackDatabase.getInstance(this@PlaybackService))
             val row = documentsStore.getDocument(segment.documentId) ?: return
             val document = ReaderDocument(row.id, Uri.parse(row.uri), row.title, row.mimeType, row.addedAtMillis, row.positionChars)
+            val isPdf = document.mimeType == "application/pdf"
+            if (!isPdf && segment.pageLength < READ_ALOUD_PAGE_SIZE) return
+            val nextStart = segment.pageStart + if (isPdf) 1L else segment.pageLength.toLong()
             val repository = RoomDocumentLibraryRepository(this@PlaybackService, documentsStore)
             val sourcePage = repository.readPage(document, nextStart, READ_ALOUD_PAGE_SIZE)
-            if (sourcePage.isBlank() || player.currentMediaItem?.mediaId != endedItem.mediaId) return
+            if (!isCurrentMediaItem(endedItem.mediaId)) return
+            if (sourcePage.isBlank()) return
             val settings = DataStoreSettingsRepository(applicationContext.settingsDataStore)
             val selectedVoice = settings.selectedSpeechVoice.first() ?: ""
             val strictOffline = settings.strictOfflineSpeech.first()
@@ -310,9 +426,9 @@ class PlaybackService : MediaSessionService() {
                     strictOffline = strictOffline,
                     documentStructure = docStructure,
                 )
-                if (player.currentMediaItem?.mediaId != endedItem.mediaId || generated.isEmpty()) return
+                if (!isCurrentMediaItem(endedItem.mediaId)) return
+                check(generated.isNotEmpty()) { "The speech engine produced no audio for the next section." }
                 val mediaItems = generated.map { segment ->
-                    val absoluteOffset = nextStart + segment.sourceOffset
                     MediaItem.Builder()
                         .setMediaId(ReadAloudUtils.readAloudMediaId(
                             document.id,
@@ -333,16 +449,18 @@ class PlaybackService : MediaSessionService() {
                         )
                         .build()
                 }
-                if (player.currentMediaItem?.mediaId != endedItem.mediaId) return
-                documentsStore.savePosition(document.id, nextStart)
-                val nextIndex = player.mediaItemCount
-                player.addMediaItems(mediaItems)
-                player.seekTo(nextIndex, 0L)
-                player.prepare()
-                player.play()
+                appendReadAloudItemsIfCurrent(endedItem.mediaId, mediaItems)
             } catch (e: Exception) {
                 // Generator shutdown is handled by onDestroy
                 throw e
+            }
+        }.onFailure { failure ->
+            if (failure is CancellationException) throw failure
+            if (isCurrentMediaItem(endedItem.mediaId)) {
+                ReadAloudStatus.reportFailure(
+                    segment.documentId,
+                    failure.message ?: "Murmur couldn't continue Read Aloud. Your reading position was preserved.",
+                )
             }
         }
     }
@@ -356,6 +474,7 @@ class PlaybackService : MediaSessionService() {
         val mimeType = fields[3]
         val strictOffline = fields[4] == "true"
         val continuous = fields[5] == "continuous"
+        ReadAloudStatus.clearFailure(documentId)
 
         runCatching {
             val documentsStore = ReaderDocumentStore(PlaybackDatabase.getInstance(this@PlaybackService))
@@ -363,8 +482,9 @@ class PlaybackService : MediaSessionService() {
             val document = ReaderDocument(row.id, Uri.parse(row.uri), row.title, row.mimeType, row.addedAtMillis, row.positionChars)
             val repository = RoomDocumentLibraryRepository(this@PlaybackService, documentsStore)
             val sourcePage = repository.readPage(document, startChar, READ_ALOUD_PAGE_SIZE)
-            if (sourcePage.isBlank() || player.currentMediaItem?.mediaId != mediaId) return
-val settings = DataStoreSettingsRepository(applicationContext.settingsDataStore)
+            if (!isCurrentMediaItem(mediaId)) return
+            check(sourcePage.isNotBlank()) { "There is no readable text at this document position." }
+            val settings = DataStoreSettingsRepository(applicationContext.settingsDataStore)
             val selectedVoice = settings.selectedSpeechVoice.first() ?: ""
             
             // Get document structure for sentence segmentation
@@ -395,7 +515,8 @@ val settings = DataStoreSettingsRepository(applicationContext.settingsDataStore)
                     strictOffline = strictOffline,
                     documentStructure = docStructure,
                 )
-                if (player.currentMediaItem?.mediaId != mediaId || generated.isEmpty()) return
+                if (!isCurrentMediaItem(mediaId)) return
+                check(generated.isNotEmpty()) { "The speech engine produced no audio for this document section." }
                 val mediaItems = generated.map { segment ->
                     MediaItem.Builder()
                         .setMediaId(ReadAloudUtils.readAloudMediaId(
@@ -417,13 +538,17 @@ val settings = DataStoreSettingsRepository(applicationContext.settingsDataStore)
                         )
                         .build()
                 }
-                if (player.currentMediaItem?.mediaId != mediaId) return
-                documentsStore.savePosition(document.id, startChar)
-                player.setMediaItems(mediaItems, 0, 0L)
-                player.prepare()
-                player.play()
+                replaceReadAloudItemsIfCurrent(mediaId, mediaItems)
             } catch (e: Exception) {
                 throw e
+            }
+        }.onFailure { failure ->
+            if (failure is CancellationException) throw failure
+            if (isCurrentMediaItem(mediaId)) {
+                ReadAloudStatus.reportFailure(
+                    documentId,
+                    failure.message ?: "Murmur couldn't start Read Aloud. Your reading position was preserved.",
+                )
             }
         }
     }
@@ -466,7 +591,10 @@ val settings = DataStoreSettingsRepository(applicationContext.settingsDataStore)
         }
     }
 
-    private companion object {
+    companion object {
         const val READ_ALOUD_PAGE_SIZE = 12_000
+        const val ACTION_START_SLEEP_TIMER = "com.joy.murmur.action.START_SLEEP_TIMER"
+        const val ACTION_CANCEL_SLEEP_TIMER = "com.joy.murmur.action.CANCEL_SLEEP_TIMER"
+        const val EXTRA_SLEEP_TIMER_MINUTES = "sleep_timer_minutes"
     }
 }

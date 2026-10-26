@@ -15,23 +15,34 @@ internal object EpubParser {
     const val MAX_CHAPTER_BYTES = 4L * 1024 * 1024
     const val MAX_CAPTURED_BYTES = 16L * 1024 * 1024
     const val MAX_UNCOMPRESSED_BYTES = 64L * 1024 * 1024
+    const val MAX_ARCHIVE_ENTRIES = 10_000
+    const val MAX_ENTRY_NAME_LENGTH = 4_096
 
-    fun readEntries(context: Context, uri: Uri): Map<String, ByteArray> {
+    fun readEntries(
+        context: Context,
+        uri: Uri,
+        checkCancelled: () -> Unit = {},
+    ): Map<String, ByteArray> {
         val input = context.contentResolver.openInputStream(uri)
             ?: throw IllegalStateException("Document unavailable")
         return input.use { raw ->
-            ZipInputStream(raw).use { zip -> readEpubEntries(zip) }
+            ZipInputStream(raw).use { zip -> readEpubEntries(zip, checkCancelled) }
         }
     }
 
-    fun readEpubEntries(zip: ZipInputStream): Map<String, ByteArray> {
+    fun readEpubEntries(zip: ZipInputStream, checkCancelled: () -> Unit = {}): Map<String, ByteArray> {
         val entries = mutableMapOf<String, ByteArray>()
         val buffer = ByteArray(8192)
         var totalUncompressed = 0L
         var totalCaptured = 0L
+        var entryCount = 0
         while (true) {
+            checkCancelled()
             val entry = zip.nextEntry ?: break
+            entryCount++
+            require(entryCount <= MAX_ARCHIVE_ENTRIES) { "EPUB contains too many archive entries." }
             val name = entry.name
+            require(name.length <= MAX_ENTRY_NAME_LENGTH) { "EPUB archive entry name is too long." }
             val isMetadata = name == "META-INF/container.xml" || name.endsWith(".opf", ignoreCase = true)
             val isChapter = name.endsWith(".xhtml", ignoreCase = true) || name.endsWith(".html", ignoreCase = true) || name.endsWith(".htm", ignoreCase = true)
             val isToc = name.endsWith("toc.ncx", ignoreCase = true) || name.endsWith("nav.xhtml", ignoreCase = true) || name.contains("toc", ignoreCase = true)
@@ -44,6 +55,7 @@ internal object EpubParser {
             val output = if (captureLimit > 0) ByteArrayOutputStream() else null
             var entrySize = 0
             while (true) {
+                checkCancelled()
                 val count = zip.read(buffer)
                 if (count < 0) break
                 totalUncompressed += count
@@ -134,7 +146,7 @@ internal object EpubParser {
         if (spinePath != null) {
             val spineXml = entries[spinePath]
             if (spineXml != null) {
-                parseSpine(spineXml, entries, tocEntries)
+                parseSpine(spineXml, entries, tocEntries, packagePath)
             }
         }
 
@@ -188,13 +200,16 @@ internal object EpubParser {
         elements(navPoint, "navPoint").forEach { parseNavPoint(it, level + 1, packagePath, tocEntries) }
     }
 
-    private fun parseSpine(spineBytes: ByteArray, entries: Map<String, ByteArray>, tocEntries: MutableList<TocEntry>) {
+    private fun parseSpine(
+        spineBytes: ByteArray,
+        entries: Map<String, ByteArray>,
+        tocEntries: MutableList<TocEntry>,
+        packagePath: String,
+    ) {
         val doc = parseXml(spineBytes)
         val itemrefs = elements(doc, "itemref")
         val manifest = elements(doc, "item").associate { item ->
-            item.getAttribute("id") to EpubParser.resolveZipPath(
-                spineBytes.toString(), item.getAttribute("href")
-            )
+            item.getAttribute("id") to resolveZipPath(packagePath, item.getAttribute("href"))
         }
         itemrefs.forEachIndexed { index, itemref ->
             val idref = itemref.getAttribute("idref")

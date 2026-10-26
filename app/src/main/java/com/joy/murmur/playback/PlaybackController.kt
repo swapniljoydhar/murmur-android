@@ -2,6 +2,7 @@
 
 import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
@@ -398,6 +399,22 @@ class PlaybackController(
         } finally {
             controllerLock.unlock()
         }
+    }
+
+    fun startSleepTimer(minutes: Int) {
+        if (minutes !in 1..SleepTimer.MAX_DURATION_MINUTES) return
+        appContext.startService(
+            Intent(appContext, PlaybackService::class.java)
+                .setAction(PlaybackService.ACTION_START_SLEEP_TIMER)
+                .putExtra(PlaybackService.EXTRA_SLEEP_TIMER_MINUTES, minutes),
+        )
+    }
+
+    fun cancelSleepTimer() {
+        appContext.startService(
+            Intent(appContext, PlaybackService::class.java)
+                .setAction(PlaybackService.ACTION_CANCEL_SLEEP_TIMER),
+        )
     }
     
     fun playItem(index: Int) {

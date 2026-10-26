@@ -91,6 +91,50 @@ Those edits include end-of-page reader-progress synchronization, cross-generator
 
 The “four remaining phases” reported earlier in chat were a coarse milestone grouping. The supplied master engineering prompt contains thirteen named phases. This table exposes the difference instead of claiming that the entire master plan is finished.
 
+## Current working-tree update — 2026-10-26
+
+The earlier checkpoint above is historical. The current checkout is at `ecc8245` with additional uncommitted changes. A bounded PDF/read-aloud slice now replaces the reflective PDF text lookup with Android 15/API 35 `PdfRenderer.Page.getTextContents()`, supports page-wise PDF text search and page-index position/continuation, and presents an explicit unsupported path below API 35 or for pages with no extractable text. A focused PDF instrumentation test source was added. PDF OCR is not implemented.
+
+The next source-level fix preserves Markdown character indexes while stripping spoken markup and adjusts speech chunk offsets for trimmed leading whitespace. This prevents generated segment offsets from shifting merely because Markdown syntax was removed. Unit tests cover this transformation, but not actual Read Aloud playback or the reader UI's return-to-position behavior.
+
+The reader also now follows persisted position changes while open, allowing its displayed page to catch up to Read Aloud segment progress. This is not sentence highlighting or time-continuous following and still requires device verification.
+
+Service-side Read Aloud start and continuation failures now publish a process-local, document-scoped status. The reader offers a retry from the saved position, while the Read Aloud player directs users back to the document. The service only persists the next page position after synthesis succeeds; unit tests cover status behavior, but full retry behavior is unverified on-device.
+
+The Activity, reader, and playback service construct separate system TTS generators sharing the same cache directory. Their voice changes, synthesis, and cache eviction now use a process-wide mutex. This prevents concurrent generator instances from writing or evicting cache entries at the same time; device stress testing remains outstanding.
+
+Restoration now removes ephemeral `read_aloud_start|...` entries and does not automatically generate/start near-end speech after service creation. Restored queues remain paused until an explicit play action. A player error on a Read Aloud segment stores that segment's source position and offers a return-to-reader retry. Process-death and missing-cache behavior still require device validation.
+
+The restore policy is isolated and unit-tested for transient-marker removal, paused restoration, and keeping or resetting positions as appropriate. This does not prove actual Media3 process recreation.
+
+A fixed-duration sleep timer now runs in the playback service and is available in Music, Audiobooks, and Read Aloud players. It persists a deadline across service recreation and pauses the player directly at expiry. The old alarm receiver path was removed because it was not manifest-declared and its requested service action was unhandled. Presets are 15, 30, 45, and 60 minutes; chapter-end and custom timers remain deferred. Unit coverage only verifies remaining-time clamping; actual background expiry and service/process recreation remain unverified on-device.
+
+Read Aloud service synthesis and repository access run on IO, while ExoPlayer access is marshalled to its main looper. Queue identity is rechecked before replacing/appending generated media, preventing stale synthesis from mutating a newer playback selection. This is build-verified but not runtime-tested.
+
+Document, audiobook, and direct music SAF imports now require a retained read grant before saving or queuing the selected URI. The UI reports selections skipped because a provider did not grant persistent access and distinguishes unsupported audio/document formats. The document empty state includes PDF and states that PDF text extraction requires Android 15 or newer. This behavior is source- and build-verified; provider-specific grant/revocation behavior is still untested on-device.
+
+Read Aloud source position now saves at segment transitions, pause events, playback errors, and service destruction. The saved location is the segment's source anchor; Murmur does not yet map elapsed audio time to a sentence within that segment. This is build-verified and needs pause/process-death device checks.
+
+PlaybackService now tracks marker-start and continuation synthesis jobs, cancels them when playback leaves Read Aloud or switches to another document, and the system TTS generator checks cancellation between cached or synthesized chunks and stops the engine after a failed/cancelled chunk. The stale-media identity guard remains as an additional queue-mutation check. This source change needs cancellation/rapid-replacement stress validation on-device.
+
+Before the reader queues generated audio, it now confirms the source page and current playback queue still match the state present when synthesis began. A changed page or queue leaves the newer state in place and asks the user to retry. This guard is build-verified; timing behavior needs device validation.
+
+EPUB TOC spine fallback now resolves relative chapter links against the OPF file path. A source bug had passed OPF XML text as the base path, breaking EPUBs without a usable nav/NCX. Unit tests cover spine fallback and archive traversal rejection; real-world EPUB/provider compatibility remains unverified.
+
+EPUB ZIP reading now limits archives to 10,000 entries and entry names to 4,096 characters, alongside existing uncompressed-byte and captured-content limits. A unit test covers archives that exceed the entry bound using empty entries. The chosen limits still need validation against a representative EPUB collection.
+
+Document indexing and EPUB parsing now check coroutine cancellation between text buffers, ZIP reads/entries, and chapters. EPUB repository operations pass their coroutine context into archive reading, with a focused unit test proving cancellation aborts parsing. A provider input stream blocked inside a single read remains dependent on that read returning.
+
+Validation after the reader/EPUB changes: `:app:testDebugUnitTest` passed, including `EpubParserTest` (4 tests, 0 failures); `:app:assembleDebugAndroidTest` and `:app:assembleDebug` passed; `git diff --check` passed. Instrumentation sources compiled but were not run on a device.
+
+Audiobook chapter handling now removes the long-file 30-minute heuristic and requires actual parsed starts for Vorbis chapter entries. The Vorbis mapper supports timestamp/name comments and explicit START/END keys, rejects boundaries at or past known duration, and identifies the source as VORBIS. The ID3 fallback now reads a capped tag from the selected content URI and parses v2.3/v2.4 CHAP frames with four-byte time fields; unsupported unsynchronized tags fail closed. Three ID3 and three Vorbis unit tests cover these mappings, but actual Ogg/MP3/M4B files and device seeking remain unverified.
+
+Validation after the audiobook parser changes: `:app:testDebugUnitTest` passed, including `Id3ChapterParserTest` (3 tests) and `VorbisChapterMappingTest` (3 tests); `:app:assembleDebugAndroidTest`, `:app:assembleDebug`, and `git diff --check` passed. Instrumentation sources compiled but were not run.
+
+Validation after the audiobook changes: `:app:testDebugUnitTest` passed, including `VorbisChapterMappingTest` (3 tests, 0 failures); `:app:assembleDebugAndroidTest`, `:app:assembleDebug`, and `git diff --check` passed. Instrumentation was compiled but not executed.
+
+Validation on this exact source tree succeeded for `:app:assembleDebug`, `:app:testDebugUnitTest`, and `:app:assembleDebugAndroidTest`. The last command proves instrumentation sources compile; PDF instrumentation tests were not run. No device was connected, and the configured API 37 emulator system image is missing, so PDF rendering/extraction, TTS playback, and all device acceptance remain unverified. The generated debug merged manifest was inspected: no `INTERNET` permission is present; `ACCESS_NETWORK_STATE` is present. See `docs/TESTING.md` and `planning/PRODUCT_GAP_AUDIT.md` for the current evidence and remaining work.
+
 ## Immediate handoff state
 
 1. Preserve branch `main` and inspect `git status`; keep the unverified edits separate from doc-only changes.

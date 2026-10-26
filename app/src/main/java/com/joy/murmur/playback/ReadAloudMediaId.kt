@@ -162,14 +162,7 @@ fun createCacheIdentity(
  * Markdown to speech text conversion with offset mapping.
  * Returns the cleaned text and a mapping from speech text offsets to source markdown offsets.
  */
-fun markdownForSpeech(source: String): String = source
-    .replace(Regex("```[\\s\\S]*?```"), " ")
-    .replace(Regex("!\\[([^]]*)]\\([^)]+\\)"), "$1")
-    .replace(Regex("\\[([^]]+)]\\([^)]+\\)"), "$1")
-    .replace(Regex("(?m)^\\s{0,3}#{1,6}\\s*"), "")
-    .replace(Regex("(?m)^\\s*(?:[-*+]\\s+|\\d+[.)]\\s+)"), "")
-    .replace(Regex("(?m)^\\s*>\\s?"), "")
-    .replace(Regex("[*_~`]"), "")
+fun markdownForSpeech(source: String): String = ReadAloudUtils.markdownForSpeech(source)
 
 /**
  * Generates a document fingerprint from the source URI and metadata.

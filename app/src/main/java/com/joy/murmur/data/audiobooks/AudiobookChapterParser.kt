@@ -2,7 +2,6 @@ package com.joy.murmur.data.audiobooks
 
 import android.content.Context
 import android.net.Uri
-import android.media.MediaMetadataRetriever
 import android.os.ParcelFileDescriptor
 import androidx.media3.common.MediaItem
 import androidx.media3.common.util.UnstableApi
@@ -12,8 +11,8 @@ import com.joy.murmur.domain.audiobooks.AudiobookChapter
 import com.joy.murmur.domain.audiobooks.ChapterSource
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.InputStream
 import java.io.FileInputStream
-import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.UUID
@@ -31,9 +30,7 @@ class AudiobookChapterParser(private val context: Context) {
         private const val MP4_ATOM_SKIP = 0x736B6970.toInt() // "skip"
         private const val MP4_ATOM_WIDE = 0x77696465.toInt() // "wide"
         private const val MAX_ATOM_SIZE = 100 * 1024 * 1024L // 100MB safety limit
-        private const val MAX_CHAPTERS = 10000
         private const val ID3_HEADER_SIZE = 10
-        private const val ID3_FRAME_HEADER_SIZE = 10
         private const val MAX_ID3_TAG_SIZE = 16 * 1024 * 1024L // 16MB safety limit
     }
 
@@ -51,8 +48,7 @@ class AudiobookChapterParser(private val context: Context) {
         val vorbisChapters = tryVorbisChapters(uri, durationMs)
         if (vorbisChapters.isNotEmpty()) return@withContext vorbisChapters
 
-        // Fallback: heuristic chapter detection
-        tryHeuristicChapters(uri, durationMs)
+        emptyList()
     }
 
     @UnstableApi
@@ -99,159 +95,20 @@ class AudiobookChapterParser(private val context: Context) {
 
     private fun tryId3Chapters(uri: Uri, durationMs: Long): List<AudiobookChapter> {
         return try {
-            val descriptor = context.contentResolver.openFileDescriptor(uri, "r")
-            descriptor?.use { fileDescriptor ->
-                val file = java.io.File(fileDescriptor.toString())
-                tryId3ChaptersFromFile(file, durationMs)
-            } ?: emptyList()
-        } catch (_: Exception) {
-            emptyList()
-        }
-    }
-
-    private fun tryId3ChaptersFromFile(file: java.io.File, durationMs: Long): List<AudiobookChapter> {
-        return try {
-            val raf = RandomAccessFile(file, "r")
-            try {
-                // Read ID3v2 header
+            val input = context.contentResolver.openInputStream(uri) ?: return emptyList()
+            input.use { stream ->
                 val header = ByteArray(ID3_HEADER_SIZE)
-                if (raf.read(header) != ID3_HEADER_SIZE) return emptyList()
-                
-                // Check for "ID3" identifier
-                if (!header.contentEquals("ID3".toByteArray())) return emptyList()
-                
-                // Parse version
-                val majorVersion = header[3].toInt()
-                
-                // Parse flags
-                val flags = header[5].toInt()
-                val hasExtendedHeader = (flags and 0x40) != 0
-                
-                // Parse size (synchsafe integer)
-                val sizeBytes = header.copyOfRange(6, 10)
-                var tagSize = 0L
-                for (i in 0 until 4) {
-                    tagSize = (tagSize shl 7) + (sizeBytes[i].toInt() and 0x7F)
-                }
-                
-                if (tagSize <= 0 || tagSize > MAX_ID3_TAG_SIZE) return emptyList()
-                
-                // Skip extended header if present
-                var offset = ID3_HEADER_SIZE.toLong()
-                if (hasExtendedHeader) {
-                    val extHeaderSizeBytes = ByteArray(4)
-                    raf.seek(offset)
-                    if (raf.read(extHeaderSizeBytes) != 4) return emptyList()
-                    val extHeaderSize = ByteBuffer.wrap(extHeaderSizeBytes).order(ByteOrder.BIG_ENDIAN).long
-                    offset += extHeaderSize
-                }
-                
-                val chapters = mutableListOf<AudiobookChapter>()
-                var chapterIndex = 0
-                
-                // Parse frames
-                while (offset < ID3_HEADER_SIZE + tagSize - ID3_FRAME_HEADER_SIZE) {
-                    raf.seek(offset)
-                    val frameHeader = ByteArray(ID3_FRAME_HEADER_SIZE)
-                    if (raf.read(frameHeader) != ID3_FRAME_HEADER_SIZE) break
-                    
-                    val frameId = String(frameHeader.copyOfRange(0, 4))
-                    val frameSize = ByteBuffer.wrap(frameHeader.copyOfRange(4, 8)).order(ByteOrder.BIG_ENDIAN).long
-                    val frameFlags = frameHeader.copyOfRange(8, 10)
-                    
-                    if (frameSize <= 0 || frameSize > MAX_ID3_TAG_SIZE) break
-                    if (frameId == "CHAP") {
-                        val frameData = ByteArray(frameSize.toInt())
-                        raf.seek(offset + ID3_FRAME_HEADER_SIZE)
-                        if (raf.read(frameData) == frameSize.toInt()) {
-                            parseChapFrame(frameData, chapters, chapterIndex, durationMs)
-                            chapterIndex++
-                        }
-                    }
-                    
-                    offset += ID3_FRAME_HEADER_SIZE + frameSize
-                    raf.seek(offset)
-                }
-                
-                if (chapters.isNotEmpty()) {
-                    chapters.sortBy { it.startMs }
-                    for (i in 0 until chapters.size - 1) {
-                        chapters[i] = chapters[i].copy(endMs = chapters[i + 1].startMs)
-                    }
-                    if (durationMs > 0 && chapters.last().endMs == null) {
-                        chapters[chapters.lastIndex] = chapters.last().copy(endMs = durationMs)
-                    }
-                    return chapters
-                }
-                emptyList()
-            } finally {
-                raf.close()
+                if (!readExactly(stream, header)) return emptyList()
+                if (header[0] != 'I'.code.toByte() || header[1] != 'D'.code.toByte() || header[2] != '3'.code.toByte()) return emptyList()
+                val tagSize = decodeSynchsafeInteger(header, 6) ?: return emptyList()
+                if (tagSize !in 1..MAX_ID3_TAG_SIZE) return emptyList()
+                val tag = ByteArray(ID3_HEADER_SIZE + tagSize.toInt())
+                header.copyInto(tag)
+                if (!readExactly(stream, tag, ID3_HEADER_SIZE, tagSize.toInt())) return emptyList()
+                parseId3ChapterTag(tag, durationMs)
             }
         } catch (_: Exception) {
             emptyList()
-        }
-    }
-
-    private fun parseChapFrame(data: ByteArray, chapters: MutableList<AudiobookChapter>, chapterIndex: Int, durationMs: Long) {
-        var pos = 0
-        val idEnd = data.indexOfFirst { it == 0.toByte() }.takeIf { it >= 0 } ?: return
-        val elementId = String(data.copyOfRange(0, idEnd))
-        pos = idEnd + 1
-        
-        if (pos + 32 > data.size) return
-        
-        val startTimeMs = ByteBuffer.wrap(data, pos, 8).order(ByteOrder.BIG_ENDIAN).long
-        pos += 8
-        val endTimeMs = ByteBuffer.wrap(data, pos, 8).order(ByteOrder.BIG_ENDIAN).long
-        pos += 8
-        pos += 16 // Skip start/end offsets
-        
-        // Parse sub-frames for title (TIT2)
-        var subPos = pos
-        var title = "Chapter ${chapterIndex + 1}"
-        while (subPos + ID3_FRAME_HEADER_SIZE <= data.size) {
-            val subFrameHeader = data.copyOfRange(subPos, subPos + ID3_FRAME_HEADER_SIZE)
-            val subFrameId = String(subFrameHeader.copyOfRange(0, 4))
-            val subFrameSize = ByteBuffer.wrap(subFrameHeader.copyOfRange(4, 8)).order(ByteOrder.BIG_ENDIAN).int
-            
-            if (subFrameSize <= 0 || subPos + ID3_FRAME_HEADER_SIZE + subFrameSize > data.size) break
-            
-            if (subFrameId == "TIT2") {
-                val subFrameData = data.copyOfRange(subPos + ID3_FRAME_HEADER_SIZE, subPos + ID3_FRAME_HEADER_SIZE + subFrameSize)
-                title = parseId3TextFrame(subFrameData)
-                break
-            }
-            
-            subPos += ID3_FRAME_HEADER_SIZE + subFrameSize
-        }
-        
-        val startMs = startTimeMs.coerceAtLeast(0L).coerceAtMost(durationMs)
-        val endMs = if (endTimeMs == -1L || endTimeMs == 0L) {
-            null
-        } else {
-            endTimeMs.coerceAtLeast(startMs).coerceAtMost(durationMs).takeIf { it > startMs }
-        }
-        
-        chapters.add(AudiobookChapter(
-            id = UUID.randomUUID().toString(),
-            audiobookId = "",
-            index = chapterIndex,
-            title = title.trim(),
-            startMs = startMs,
-            endMs = endMs,
-            source = ChapterSource.CONTAINER,
-        ))
-    }
-
-    private fun parseId3TextFrame(data: ByteArray): String {
-        if (data.isEmpty()) return ""
-        val encoding = data[0].toInt()
-        return when (encoding) {
-            0 -> String(data.copyOfRange(1, data.size), java.nio.charset.StandardCharsets.ISO_8859_1)
-            1 -> String(data.copyOfRange(1, data.size), java.nio.charset.StandardCharsets.UTF_16).replace("\u0000", "")
-            2 -> String(data.copyOfRange(1, data.size), java.nio.charset.StandardCharsets.UTF_16BE).replace("\u0000", "")
-            3 -> String(data.copyOfRange(1, data.size), java.nio.charset.StandardCharsets.UTF_8).replace("\u0000", "")
-            else -> ""
         }
     }
 
@@ -276,7 +133,6 @@ class AudiobookChapterParser(private val context: Context) {
                 if (!header.contentEquals("OggS".toByteArray())) return emptyList()
                 
                 val chapters = mutableListOf<AudiobookChapter>()
-                var chapterIndex = 0
                 
                 // Simple OGG page parsing to find VorbisComment packets
                 val fileLength = fis.channel.size()
@@ -313,8 +169,7 @@ class AudiobookChapterParser(private val context: Context) {
                     
                     // Check if this is a VorbisComment packet (first packet after identification header)
                     if (pageData.size >= 7 && pageData[0].toInt() == 3 && pageData.contentEquals("vorbis".toByteArray())) {
-                        parseVorbisComment(pageData, chapters, chapterIndex, durationMs)
-                        chapterIndex = chapters.size
+                        parseVorbisComment(pageData, chapters, durationMs)
                     }
                     
                     // Skip remaining data in this page if any
@@ -328,7 +183,10 @@ class AudiobookChapterParser(private val context: Context) {
                 if (chapters.isNotEmpty()) {
                     chapters.sortBy { it.startMs }
                     for (i in 0 until chapters.size - 1) {
-                        chapters[i] = chapters[i].copy(endMs = chapters[i + 1].startMs)
+                        val nextStart = chapters[i + 1].startMs
+                        if (chapters[i].endMs == null || chapters[i].endMs!! <= chapters[i].startMs) {
+                            chapters[i] = chapters[i].copy(endMs = nextStart)
+                        }
                     }
                     if (durationMs > 0 && chapters.last().endMs == null) {
                         chapters[chapters.lastIndex] = chapters.last().copy(endMs = durationMs)
@@ -344,94 +202,30 @@ class AudiobookChapterParser(private val context: Context) {
         }
     }
 
-    private fun parseVorbisComment(data: ByteArray, chapters: MutableList<AudiobookChapter>, chapterIndex: Int, durationMs: Long) {
+    private fun parseVorbisComment(data: ByteArray, chapters: MutableList<AudiobookChapter>, durationMs: Long) {
         var pos = 0
         if (data.size < 4) return
         
         val vendorLength = ByteBuffer.wrap(data, pos, 4).order(ByteOrder.LITTLE_ENDIAN).int
+        if (vendorLength < 0 || vendorLength > data.size - pos - 4) return
         pos += 4 + vendorLength
         
         if (pos + 4 > data.size) return
         val commentCount = ByteBuffer.wrap(data, pos, 4).order(ByteOrder.LITTLE_ENDIAN).int
         pos += 4
-        
-        val chapterRegex = "^CHAPTER(\\d{3})=(.+)".toRegex()
-        val chapterTimeRegex = "^CHAPTER(\\d{3})START=(\\d+)".toRegex()
-        val chapterEndRegex = "^CHAPTER(\\d{3})END=(\\d+)".toRegex()
-        
-        val chapterTitles = mutableMapOf<Int, String>()
-        val chapterStarts = mutableMapOf<Int, Long>()
-        val chapterEnds = mutableMapOf<Int, Long>()
-        
+        if (commentCount < 0 || commentCount > (data.size - pos) / 4) return
+        val comments = mutableListOf<String>()
         repeat(commentCount) {
             if (pos + 4 > data.size) return
             val commentLength = ByteBuffer.wrap(data, pos, 4).order(ByteOrder.LITTLE_ENDIAN).int
             pos += 4
             
-            if (pos + commentLength > data.size) return
-            val comment = String(data.copyOfRange(pos, pos + commentLength))
+            if (commentLength < 0 || commentLength > data.size - pos) return
+            val comment = String(data, pos, commentLength, Charsets.UTF_8)
             pos += commentLength
-            
-            chapterRegex.find(comment)?.let { match ->
-                val num = match.groupValues[1].toIntOrNull() ?: return@repeat
-                val title = match.groupValues[2].trim()
-                if (title.isNotBlank()) chapterTitles[num] = title
-            }
-            
-            chapterTimeRegex.find(comment)?.let { match ->
-                val num = match.groupValues[1].toIntOrNull() ?: return@repeat
-                val time = match.groupValues[2].toLongOrNull() ?: return@repeat
-                chapterStarts[num] = time
-            }
-            
-            chapterEndRegex.find(comment)?.let { match ->
-                val num = match.groupValues[1].toIntOrNull() ?: return@repeat
-                val time = match.groupValues[2].toLongOrNull() ?: return@repeat
-                chapterEnds[num] = time
-            }
+            comments += comment
         }
-        
-        chapterTitles.keys.sorted().forEach { num ->
-            val title = chapterTitles[num] ?: "Chapter ${num + 1}"
-            val startMs = chapterStarts[num]?.coerceAtLeast(0L) ?: (num.toLong() * 30 * 60 * 1000).coerceAtMost(durationMs)
-            val endMs = chapterEnds[num]?.takeIf { it > startMs }?.coerceAtMost(durationMs)
-            
-            chapters.add(AudiobookChapter(
-                id = UUID.randomUUID().toString(),
-                audiobookId = "",
-                index = num,
-                title = title.trim(),
-                startMs = startMs,
-                endMs = endMs,
-                source = ChapterSource.CONTAINER,
-            ))
-        }
-    }
-
-    private fun tryHeuristicChapters(uri: Uri, durationMs: Long): List<AudiobookChapter> {
-        return try {
-            if (durationMs <= 10 * 60 * 60 * 1000L) return emptyList()
-
-            val chapterIntervalMs = 30 * 60 * 1000L // 30 minutes
-            val chapterCount = (durationMs / chapterIntervalMs).coerceAtMost(MAX_CHAPTERS.toLong()).toInt()
-            if (chapterCount <= 1) return emptyList()
-
-            (0 until chapterCount).map { index ->
-                val startMs = index * chapterIntervalMs
-                val endMs = if (index == chapterCount - 1) durationMs else (index + 1) * chapterIntervalMs
-                AudiobookChapter(
-                    id = UUID.randomUUID().toString(),
-                    audiobookId = "",
-                    index = index,
-                    title = "Part ${index + 1}",
-                    startMs = startMs,
-                    endMs = endMs,
-                    source = ChapterSource.HEURISTIC,
-                )
-            }
-        } catch (_: Exception) {
-            emptyList()
-        }
+        chapters += parseVorbisChapterComments(comments, durationMs)
     }
 
     private data class ChapterCandidate(
@@ -439,4 +233,220 @@ class AudiobookChapterParser(private val context: Context) {
         val startMs: Long,
         val endMs: Long?
     )
+}
+
+internal fun parseVorbisChapterComments(
+    comments: List<String>,
+    durationMs: Long,
+): List<AudiobookChapter> {
+    val timestampOrTitle = Regex("^CHAPTER(\\d{1,3})=(.+)$", RegexOption.IGNORE_CASE)
+    val namePattern = Regex("^CHAPTER(\\d{1,3})NAME=(.+)$", RegexOption.IGNORE_CASE)
+    val startPattern = Regex("^CHAPTER(\\d{1,3})START=(\\d+)$", RegexOption.IGNORE_CASE)
+    val endPattern = Regex("^CHAPTER(\\d{1,3})END=(\\d+)$", RegexOption.IGNORE_CASE)
+    val titles = mutableMapOf<Int, String>()
+    val starts = mutableMapOf<Int, Long>()
+    val ends = mutableMapOf<Int, Long>()
+
+    comments.forEach { comment ->
+        timestampOrTitle.matchEntire(comment)?.let { match ->
+            val number = match.groupValues[1].toIntOrNull() ?: return@let
+            val value = match.groupValues[2].trim()
+            val timestamp = parseVorbisTimestamp(value)
+            if (timestamp != null) {
+                starts[number] = timestamp
+                if (number !in titles) titles[number] = "Chapter $number"
+            } else if (value.isNotBlank()) {
+                titles[number] = value
+            }
+        }
+        namePattern.matchEntire(comment)?.let { match ->
+            val number = match.groupValues[1].toIntOrNull() ?: return@let
+            match.groupValues[2].trim().takeIf(String::isNotBlank)?.let { titles[number] = it }
+        }
+        startPattern.matchEntire(comment)?.let { match ->
+            val number = match.groupValues[1].toIntOrNull() ?: return@let
+            match.groupValues[2].toLongOrNull()?.let { starts[number] = it }
+        }
+        endPattern.matchEntire(comment)?.let { match ->
+            val number = match.groupValues[1].toIntOrNull() ?: return@let
+            match.groupValues[2].toLongOrNull()?.let { ends[number] = it }
+        }
+    }
+
+    val candidates = starts.keys.mapNotNull { number ->
+        val start = starts[number] ?: return@mapNotNull null
+        if (start < 0L || (durationMs > 0L && start >= durationMs)) return@mapNotNull null
+        val title = titles[number]?.trim()?.takeIf(String::isNotBlank) ?: "Chapter $number"
+        Triple(number, title, start)
+    }.distinctBy { it.third }.sortedBy { it.third }
+
+    return candidates.mapIndexed { index, (number, title, start) ->
+        val followingStart = candidates.getOrNull(index + 1)?.third
+        val parsedEnd = ends[number]?.takeIf { it > start }
+            ?.let { if (durationMs > 0L) it.coerceAtMost(durationMs) else it }
+            ?.takeIf { it > start }
+        val end = parsedEnd ?: followingStart ?: durationMs.takeIf { it > start }
+        AudiobookChapter(
+            id = UUID.randomUUID().toString(),
+            audiobookId = "",
+            index = index,
+            title = title,
+            startMs = start,
+            endMs = end,
+            source = ChapterSource.VORBIS,
+        )
+    }
+}
+
+private data class Id3ChapterCandidate(val title: String, val startMs: Long, val endMs: Long?)
+
+internal fun parseId3ChapterTag(tag: ByteArray, durationMs: Long): List<AudiobookChapter> {
+    if (tag.size < 10 || tag[0] != 'I'.code.toByte() || tag[1] != 'D'.code.toByte() || tag[2] != '3'.code.toByte()) return emptyList()
+    val majorVersion = tag[3].toInt() and 0xFF
+    if (majorVersion !in 3..4) return emptyList()
+    val tagFlags = tag[5].toInt() and 0xFF
+    if (tagFlags and 0x80 != 0) return emptyList() // Tag-level unsynchronization isn't decoded here.
+    val tagSize = decodeSynchsafeInteger(tag, 6) ?: return emptyList()
+    if (tagSize !in 1..MAX_ID3_CHAPTER_TAG_BYTES || tagSize > tag.size - 10L) return emptyList()
+    val tagEnd = 10 + tagSize.toInt() - if (majorVersion == 4 && tagFlags and 0x10 != 0) 10 else 0
+    if (tagEnd < 10) return emptyList()
+
+    var offset = 10
+    if (tagFlags and 0x40 != 0) {
+        if (offset + 4 > tagEnd) return emptyList()
+        val extendedSize = if (majorVersion == 4) {
+            decodeSynchsafeInteger(tag, offset)?.toInt() ?: return emptyList()
+        } else {
+            readUnsignedInt(tag, offset)?.toInt() ?: return emptyList()
+        }
+        val totalExtendedSize = if (majorVersion == 3) extendedSize.toLong() + 4L else extendedSize.toLong()
+        if (totalExtendedSize < 4L || totalExtendedSize > tagEnd - offset) return emptyList()
+        offset += totalExtendedSize.toInt()
+    }
+
+    val candidates = mutableListOf<Id3ChapterCandidate>()
+    while (offset + 10 <= tagEnd) {
+        if (tag[offset] == 0.toByte()) break
+        val frameId = String(tag, offset, 4, Charsets.US_ASCII)
+        val frameSize = if (majorVersion == 4) {
+            decodeSynchsafeInteger(tag, offset + 4)
+        } else {
+            readUnsignedInt(tag, offset + 4)
+        } ?: break
+        if (frameSize <= 0L || frameSize > tagEnd - offset - 10L) break
+        val frameFlags = (tag[offset + 8].toInt() and 0xFF) shl 8 or (tag[offset + 9].toInt() and 0xFF)
+        if (frameId == "CHAP" && frameFlags == 0) {
+            parseId3ChapterFrame(tag, offset + 10, frameSize.toInt(), majorVersion, durationMs)?.let(candidates::add)
+        }
+        offset += 10 + frameSize.toInt()
+    }
+
+    val sorted = candidates.distinctBy(Id3ChapterCandidate::startMs).sortedBy(Id3ChapterCandidate::startMs)
+    return sorted.mapIndexed { index, chapter ->
+        val nextStart = sorted.getOrNull(index + 1)?.startMs
+        val end = chapter.endMs?.takeIf { it > chapter.startMs } ?: nextStart ?: durationMs.takeIf { it > chapter.startMs }
+        AudiobookChapter(
+            id = UUID.randomUUID().toString(),
+            audiobookId = "",
+            index = index,
+            title = chapter.title.ifBlank { "Chapter ${index + 1}" },
+            startMs = chapter.startMs,
+            endMs = end,
+            source = ChapterSource.ID3,
+        )
+    }
+}
+
+private fun parseId3ChapterFrame(
+    tag: ByteArray,
+    offset: Int,
+    frameSize: Int,
+    majorVersion: Int,
+    durationMs: Long,
+): Id3ChapterCandidate? {
+    val frameEnd = offset + frameSize
+    var elementEnd = offset
+    while (elementEnd < frameEnd && tag[elementEnd] != 0.toByte()) elementEnd++
+    if (elementEnd == frameEnd || frameEnd - elementEnd - 1 < 16) return null
+    var cursor = elementEnd + 1
+    val startMs = readUnsignedInt(tag, cursor) ?: return null
+    val endValue = readUnsignedInt(tag, cursor + 4) ?: return null
+    cursor += 16 // start/end times and start/end byte offsets are four bytes each.
+    if (startMs == 0xFFFF_FFFFL || (durationMs > 0L && startMs >= durationMs)) return null
+
+    var title = ""
+    while (cursor + 10 <= frameEnd) {
+        if (tag[cursor] == 0.toByte()) break
+        val subFrameId = String(tag, cursor, 4, Charsets.US_ASCII)
+        val subFrameSize = if (majorVersion == 4) {
+            decodeSynchsafeInteger(tag, cursor + 4)
+        } else {
+            readUnsignedInt(tag, cursor + 4)
+        } ?: break
+        if (subFrameSize <= 0L || subFrameSize > frameEnd - cursor - 10L) break
+        if (subFrameId == "TIT2") {
+            title = decodeId3Text(tag, cursor + 10, subFrameSize.toInt())
+            break
+        }
+        cursor += 10 + subFrameSize.toInt()
+    }
+
+    val endMs = endValue.takeIf { it != 0xFFFF_FFFFL && it > startMs }
+        ?.let { if (durationMs > 0L) it.coerceAtMost(durationMs) else it }
+        ?.takeIf { it > startMs }
+    return Id3ChapterCandidate(title, startMs, endMs)
+}
+
+private fun decodeId3Text(bytes: ByteArray, offset: Int, length: Int): String {
+    if (length <= 1 || offset < 0 || offset + length > bytes.size) return ""
+    val payload = bytes.copyOfRange(offset + 1, offset + length)
+    val charset = when (bytes[offset].toInt() and 0xFF) {
+        0 -> Charsets.ISO_8859_1
+        1 -> Charsets.UTF_16
+        2 -> Charsets.UTF_16BE
+        3 -> Charsets.UTF_8
+        else -> return ""
+    }
+    return String(payload, charset).replace("\u0000", "").trim()
+}
+
+private fun decodeSynchsafeInteger(bytes: ByteArray, offset: Int): Long? {
+    if (offset < 0 || offset + 4 > bytes.size) return null
+    var value = 0L
+    repeat(4) { index ->
+        val byte = bytes[offset + index].toInt() and 0xFF
+        if (byte and 0x80 != 0) return null
+        value = (value shl 7) or byte.toLong()
+    }
+    return value
+}
+
+private fun readUnsignedInt(bytes: ByteArray, offset: Int): Long? {
+    if (offset < 0 || offset + 4 > bytes.size) return null
+    return ByteBuffer.wrap(bytes, offset, 4).order(ByteOrder.BIG_ENDIAN).int.toLong() and 0xFFFF_FFFFL
+}
+
+private fun readExactly(input: InputStream, bytes: ByteArray, offset: Int = 0, length: Int = bytes.size - offset): Boolean {
+    var totalRead = 0
+    while (totalRead < length) {
+        val count = input.read(bytes, offset + totalRead, length - totalRead)
+        if (count < 0) return false
+        if (count == 0) continue
+        totalRead += count
+    }
+    return true
+}
+
+private const val MAX_ID3_CHAPTER_TAG_BYTES = 16L * 1024L * 1024L
+
+private fun parseVorbisTimestamp(value: String): Long? {
+    val match = Regex("^(\\d+):(\\d{2}):(\\d{2})(?:\\.(\\d{1,3}))?$").matchEntire(value) ?: return null
+    val hours = match.groupValues[1].toLongOrNull() ?: return null
+    val minutes = match.groupValues[2].toLongOrNull() ?: return null
+    val seconds = match.groupValues[3].toLongOrNull() ?: return null
+    if (minutes !in 0..59 || seconds !in 0..59 || hours > Long.MAX_VALUE / 3_600_000L) return null
+    val fraction = match.groupValues[4].padEnd(3, '0').toLongOrNull() ?: 0L
+    val wholeSeconds = hours * 3_600L + minutes * 60L + seconds
+    if (wholeSeconds > (Long.MAX_VALUE - fraction) / 1_000L) return null
+    return wholeSeconds * 1_000L + fraction
 }

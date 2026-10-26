@@ -2,110 +2,103 @@ package com.joy.murmur.data.documents
 
 import android.content.Context
 import android.graphics.pdf.PdfRenderer
+import android.net.Uri
 import android.os.Build
-import android.os.ParcelFileDescriptor
+import androidx.annotation.RequiresApi
+import com.joy.murmur.domain.documents.DocumentSearchMatch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
 
-/**
- * PDF text extraction utility using Android's PdfTextExtractor (API 29+)
- * Falls back gracefully on older API levels.
- * Uses reflection to access PdfRenderer.Page.getText() which was added in API 29.
- */
+/** PDF text support provided by Android 15 and later. */
 internal object PdfTextExtractor {
-    
-    /**
-     * Extracts text from a specific page of a PDF document.
-     * Returns null if text extraction is not supported on this API level or fails.
-     */
-    fun extractPageText(
-        context: Context,
-        uri: android.net.Uri,
-        pageIndex: Int
-    ): String? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-        extractPageTextApi29(context, uri, pageIndex)
-    } else {
-        null
-    }
+    private const val MAX_PDF_PAGES = 5_000
+    private const val SNIPPET_RADIUS = 36
 
-    /**
-     * Extracts text from all pages of a PDF document for searching.
-     * Returns concatenated text from all pages, or null if not supported.
-     */
-    fun extractAllText(
-        context: Context,
-        uri: android.net.Uri
-    ): String? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-        extractAllTextApi29(context, uri)
-    } else {
-        null
-    }
-
-    private fun extractPageTextApi29(
-        context: Context,
-        uri: android.net.Uri,
-        pageIndex: Int
-    ): String? {
-        val descriptor = context.contentResolver.openFileDescriptor(uri, "r")
-            ?: return null
-        val renderer = PdfRenderer(descriptor)
-        if (pageIndex < 0 || pageIndex >= renderer.pageCount) {
-            renderer.close()
-            descriptor.close()
-            return null
-        }
-        return try {
-            val page = renderer.openPage(pageIndex)
-            try {
-                // Use reflection to call PdfRenderer.Page.getText() (API 29+)
-                val text = getPageText(page)
-                if (text.isNullOrBlank()) null else text.trim()
-            } finally {
-                page.close()
-            }
-        } catch (e: Exception) {
-            null
-        } finally {
-            renderer.close()
-            descriptor.close()
+    suspend fun extractPageText(context: Context, uri: Uri, pageIndex: Int): String? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.VANILLA_ICE_CREAM) return null
+        return withContext(Dispatchers.IO) {
+            extractPageTextApi35(context, uri, pageIndex)
         }
     }
 
-    private fun extractAllTextApi29(
+    suspend fun searchDocument(
         context: Context,
-        uri: android.net.Uri
-    ): String? {
-        val descriptor = context.contentResolver.openFileDescriptor(uri, "r")
-            ?: return null
-        val renderer = PdfRenderer(descriptor)
-        return try {
-            val builder = StringBuilder()
-            for (i in 0 until renderer.pageCount) {
-                val page = renderer.openPage(i)
-                try {
-                    getPageText(page)?.let { builder.append(it).append("\n\n") }
-                } finally {
-                    page.close()
+        uri: Uri,
+        query: String,
+        limit: Int,
+    ): List<DocumentSearchMatch>? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.VANILLA_ICE_CREAM) return null
+        require(query.isNotBlank()) { "Enter text to search for." }
+        require(limit in 1..100) { "The PDF search result limit must be between 1 and 100." }
+
+        return withContext(Dispatchers.IO) {
+            searchDocumentApi35(context, uri, query, limit)
+        }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.VANILLA_ICE_CREAM)
+    private fun extractPageTextApi35(context: Context, uri: Uri, pageIndex: Int): String? {
+        val descriptor = context.contentResolver.openFileDescriptor(uri, "r") ?: return null
+        return descriptor.use { fileDescriptor ->
+            PdfRenderer(fileDescriptor).use { renderer ->
+                if (pageIndex !in 0 until renderer.pageCount) return null
+                renderer.openPage(pageIndex).use { page ->
+                    page.textContents
+                        .asSequence()
+                        .map { it.text }
+                        .filter(String::isNotBlank)
+                        .joinToString(" ")
+                        .trim()
+                        .takeIf(String::isNotEmpty)
                 }
             }
-            val result = builder.toString().trim()
-            if (result.isBlank()) null else result
-        } catch (e: Exception) {
-            null
-        } finally {
-            renderer.close()
-            descriptor.close()
         }
     }
 
-    /**
-     * Uses reflection to call PdfRenderer.Page.getText() which was added in API 29.
-     * Returns null if the method doesn't exist or fails.
-     */
-    private fun getPageText(page: PdfRenderer.Page): String? {
-        return try {
-            val method = PdfRenderer.Page::class.java.getMethod("getText")
-            method.invoke(page) as? String
-        } catch (e: Exception) {
-            null
+    @RequiresApi(Build.VERSION_CODES.VANILLA_ICE_CREAM)
+    private suspend fun searchDocumentApi35(
+        context: Context,
+        uri: Uri,
+        query: String,
+        limit: Int,
+    ): List<DocumentSearchMatch> {
+        val descriptor = context.contentResolver.openFileDescriptor(uri, "r")
+            ?: throw IllegalStateException("This PDF is no longer available.")
+        return descriptor.use { fileDescriptor ->
+            PdfRenderer(fileDescriptor).use { renderer ->
+                require(renderer.pageCount <= MAX_PDF_PAGES) {
+                    "PDF text search is limited to $MAX_PDF_PAGES pages."
+                }
+                val matches = mutableListOf<DocumentSearchMatch>()
+                for (pageIndex in 0 until renderer.pageCount) {
+                    currentCoroutineContext().ensureActive()
+                    renderer.openPage(pageIndex).use { page ->
+                        val text = page.textContents
+                            .asSequence()
+                            .map { it.text }
+                            .filter(String::isNotBlank)
+                            .joinToString(" ")
+                        var searchFrom = 0
+                        while (matches.size < limit) {
+                            val index = text.indexOf(query, searchFrom, ignoreCase = true)
+                            if (index < 0) break
+                            val start = (index - SNIPPET_RADIUS).coerceAtLeast(0)
+                            val end = (index + query.length + SNIPPET_RADIUS).coerceAtMost(text.length)
+                            val prefix = if (start > 0) "…" else ""
+                            val suffix = if (end < text.length) "…" else ""
+                            matches += DocumentSearchMatch(
+                                positionChars = pageIndex.toLong(),
+                                snippet = prefix + text.substring(start, end).trim() + suffix,
+                            )
+                            searchFrom = index + query.length.coerceAtLeast(1)
+                        }
+                    }
+                    if (matches.size >= limit) break
+                }
+                matches
+            }
         }
     }
 }

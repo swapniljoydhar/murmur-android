@@ -6,54 +6,34 @@
 - Markdown (headings, paragraphs, lists, blockquotes, code blocks, emphasis, links, separators)
 - HTML (local parsing, scripts/remote resources stripped)
 - EPUB (spine, chapters, sections, table of contents)
-- PDF (text-based, best-effort extraction, single-column focus)
+- PDF page rendering on supported Android versions
+- Selectable PDF text extraction, search, and read-aloud on Android 15 (API 35) and newer, when the PDF exposes text
+
+PDF text extraction uses `PdfRenderer.Page.getTextContents()` on API 35+. Below API 35, Murmur can render PDF pages but does not extract/search/read them aloud. Scanned or image-only pages have no OCR support and cannot be searched or read aloud.
 
 ## Reader Data Model
 
-Documents use structural content:
-```
-Document
- └── Section
-      ├── Paragraph
-      │    ├── Sentence
-      │    └── ...
-      └── ...
-```
-
-Room stores durable application state. Document-local indexes store compact structural information (not millions of Room rows for sentences).
+Reader storage currently uses document sections and character ranges for text formats, with PDF positions represented as page indexes. Paragraph/sentence anchors are not currently implemented. Room stores durable application state.
 
 ## Reader Position
 
-Position restoration uses structural anchors:
-- documentFingerprint
-- sectionId
-- paragraphId
-- sentenceId
-- textHash
-- sourcePage
-
-Restoration order:
-1. Exact structural match
-2. Text hash match
-3. Nearby structural match
-4. Safe fallback
-
-Not raw character offsets only.
+Text document positions are character offsets; PDF positions are page indexes. The reader does not currently provide structural paragraph/sentence restoration or reflow-stable anchors.
 
 ## Reader Features
 
-- Font size, line spacing, margins, alignment
-- Themes: Paper, Warm, Dark, OLED Black
-- Bookmarks
-- Auto-scroll
-- Reading ruler
-- Screen-on while actively reading
-- Search within document (on-demand, incremental for large documents)
+- Text size for supported text formats
+- Bookmarks and saved position; the open reader follows persisted Read Aloud segment positions
+- Search in supported text formats; PDF search requires API 35+ and extractable page text
+- Read Aloud from the current text page with generated speech offsets mapped back to the source document; Markdown syntax cleanup preserves source indexes
+
+Read Aloud position following is segment-level. Sentence highlighting and continuous in-page synchronization are not implemented.
+
+If service-side speech generation fails, the player reports the error and offers a route back to the document. The reader can retry from the last saved position. The failure status is process-local; the durable document position remains in Room.
+
+System TTS voice changes, synthesis, and cache eviction are serialized across the app's generator instances to protect their shared cache directory.
+
+Service restoration ignores unfinished Read Aloud start markers and keeps restored queues paused. If a cached segment cannot play, the service preserves its source offset and reports a retry path back to the reader. The user must resume or retry explicitly.
 
 ## Large Documents
 
-- Incremental parsing
-- Lazy rendering
-- Structural indexing
-- Bounded working sets
-- No full-document memory loading
+Input and indexing limits exist, but lazy reading and bounded working-set behavior are not yet established for all formats. Large-document performance still needs measurement.

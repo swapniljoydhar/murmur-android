@@ -5,11 +5,11 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
-import androidx.navigation.NavHostController
-import androidx.navigation.compose.rememberNavController
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.joy.murmur.domain.settings.AppearanceMode
 import com.joy.murmur.domain.settings.SettingsRepository
+import com.joy.murmur.data.speech.SpeechVoiceOption
+import com.joy.murmur.data.speech.VoiceNetworkRequirement
 import com.joy.murmur.ui.MurmurApp
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -24,7 +24,7 @@ class MurmurNavigationTest {
     val composeRule = createComposeRule()
 
     @Test
-    fun continueHubOpensEveryContentSection() {
+    fun continueHubOpensPrimaryContentSections() {
         composeRule.setContent {
             TestContent()
         }
@@ -37,24 +37,18 @@ class MurmurNavigationTest {
         composeRule.onNodeWithText("Back").performClick()
 
         composeRule.onNodeWithTag("destination-audiobooks").performClick()
-        composeRule.onNodeWithText("Select audiobook files from this device. Your place is saved as you listen.").assertIsDisplayed()
-        composeRule.onNodeWithText("Play selected files").assertIsDisplayed()
+        composeRule.onNodeWithText("Audiobook storage isn't available right now.").assertIsDisplayed()
         composeRule.onNodeWithText("Back").performClick()
 
         composeRule.onNodeWithTag("destination-documents").performClick()
-        composeRule.onNodeWithText("Your local documents will appear here when document support is added.").assertIsDisplayed()
-        composeRule.onNodeWithText("Back").performClick()
-
-        composeRule.onNodeWithTag("destination-read-aloud").performClick()
-        composeRule.onNodeWithText("Open a document to start reading aloud when document and speech support are added.").assertIsDisplayed()
+        composeRule.onNodeWithText("No documents yet").assertIsDisplayed()
+        composeRule.onNodeWithText("Read your documents here; listen from the open reader.").assertIsDisplayed()
     }
 
     @androidx.compose.runtime.Composable
     fun TestContent() {
-        val navController = rememberNavController()
         MurmurApp(
             settingsRepository = TestSettingsRepository(),
-            navController = navController,
             playbackController = null,
             musicLibraryRepository = null,
             musicPlaylistRepository = null,
@@ -71,5 +65,15 @@ class MurmurNavigationTest {
         override suspend fun setAppearanceMode(mode: AppearanceMode) {
             this.mode.update { mode }
         }
+
+        override suspend fun setStrictOfflineSpeech(enabled: Boolean) = Unit
+        override suspend fun setReaderTextScale(scale: Float) = Unit
+        override suspend fun setBackgroundMusicRefresh(enabled: Boolean) = Unit
+        override suspend fun setSelectedSpeechVoice(voiceName: String?) = Unit
+        override suspend fun setSelectedNeuralVoice(voiceId: String?) = Unit
+        override suspend fun setNeuralTtsSpeed(speed: Float) = Unit
+        override suspend fun setOutputProfiles(json: String) = Unit
+        override suspend fun checkVoiceEligibility(voiceName: String?) = VoiceNetworkRequirement.UNKNOWN
+        override suspend fun getAvailableVoices(): List<SpeechVoiceOption> = emptyList()
     }
 }

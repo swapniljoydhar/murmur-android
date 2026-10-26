@@ -23,6 +23,8 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -53,7 +55,7 @@ class SystemTtsSpeechGenerator(context: Context) {
     private val playbackStore = PlaybackStore(PlaybackDatabase.getInstance(appContext))
     private val ready = CompletableDeferred<Unit>()
     private val captures = ConcurrentHashMap<String, Capture>()
-    private val synthesisMutex = Mutex()
+    private val synthesisMutex = processSynthesisMutex
     private val engine = TextToSpeech(appContext) { status ->
         if (status == TextToSpeech.SUCCESS) ready.complete(Unit)
         else ready.completeExceptionally(IllegalStateException("The system speech engine isn't available."))
@@ -115,14 +117,16 @@ class SystemTtsSpeechGenerator(context: Context) {
     }
 
     suspend fun selectVoice(voiceName: String?) {
-        awaitReady()
-        if (voiceName.isNullOrBlank()) {
-            engine.voice = engine.defaultVoice
-            return
+        synthesisMutex.withLock {
+            awaitReady()
+            if (voiceName.isNullOrBlank()) {
+                engine.voice = engine.defaultVoice
+                return@withLock
+            }
+            val selected = engine.voices.orEmpty().firstOrNull { it.name == voiceName }
+                ?: throw IllegalArgumentException("That speech voice is no longer installed on this device.")
+            check(engine.setVoice(selected) == TextToSpeech.SUCCESS) { "The system speech engine couldn't select that voice." }
         }
-        val selected = engine.voices.orEmpty().firstOrNull { it.name == voiceName }
-            ?: throw IllegalArgumentException("That speech voice is no longer installed on this device.")
-        check(engine.setVoice(selected) == TextToSpeech.SUCCESS) { "The system speech engine couldn't select that voice." }
     }
 
     fun currentIdentity(): String {
@@ -150,10 +154,12 @@ class SystemTtsSpeechGenerator(context: Context) {
             Uri.parse(item.uri).takeIf { it.scheme == "file" }?.path
         }.toSet()
         withContext(Dispatchers.IO) {
+            currentCoroutineContext().ensureActive()
             evictSpeechCache(queuedFiles)
             val voiceIdentity = listOf(engine.defaultEngine.orEmpty(), engine.voice?.name.orEmpty(), engine.voice?.locale?.toLanguageTag().orEmpty())
                 .joinToString("|")
             splitSpeechText(text, (TextToSpeech.getMaxSpeechInputLength() - 128).coerceAtLeast(256)).mapIndexed { index, chunk ->
+                currentCoroutineContext().ensureActive()
                 val digest = sha256("$identity|$voiceIdentity|${chunk.text}")
                 val destination = File(outputDirectory, "$digest.wav")
                 if (destination.isFile && destination.length() > 44L) {
@@ -211,6 +217,7 @@ class SystemTtsSpeechGenerator(context: Context) {
             check(result == TextToSpeech.SUCCESS) { "The system speech engine rejected a speech segment." }
             withTimeout(120_000L) { capture.result.await() }
         } catch (error: Exception) {
+            runCatching { engine.stop() }
             captures.remove(utteranceId)
             synchronized(capture) { runCatching { capture.output?.close() } }
             raw.delete()
@@ -350,6 +357,8 @@ class SystemTtsSpeechGenerator(context: Context) {
             currentStart = -1
         }
         sentenceMatches.forEach { match ->
+            val leadingWhitespace = match.value.indexOfFirst { !it.isWhitespace() }.coerceAtLeast(0)
+            val sentenceStart = match.range.first + leadingWhitespace
             val sentence = match.value.trim()
             if (sentence.isEmpty()) return@forEach
             sentenceCounter++
@@ -364,14 +373,19 @@ class SystemTtsSpeechGenerator(context: Context) {
                         val boundary = sentence.lastIndexOf(' ', end)
                         if (boundary > offset + limit / 2) end = boundary
                     }
-                    output += SpeechChunk(match.range.first + offset, sentence.substring(offset, end).trim(), listOf(sentenceId))
+                    val rawChunk = sentence.substring(offset, end)
+                    val leadingChunkWhitespace = rawChunk.indexOfFirst { !it.isWhitespace() }.coerceAtLeast(0)
+                    val chunkText = rawChunk.trim()
+                    if (chunkText.isNotEmpty()) {
+                        output += SpeechChunk(sentenceStart + offset + leadingChunkWhitespace, chunkText, listOf(sentenceId))
+                    }
                     offset = end
                     while (offset < sentence.length && sentence[offset].isWhitespace()) offset++
                 }
             } else {
                 val addition = if (current.isEmpty()) sentence else " $sentence"
                 if (current.length + addition.length > limit) flush()
-                if (current.isEmpty()) currentStart = match.range.first
+                if (current.isEmpty()) currentStart = sentenceStart
                 if (current.isNotEmpty()) current.append(' ')
                 current.append(sentence)
                 currentSentenceIds.add(sentenceId)
@@ -388,6 +402,9 @@ class SystemTtsSpeechGenerator(context: Context) {
         .joinToString("") { byte -> "%02x".format(Locale.ROOT, byte.toInt() and 0xFF) }
 
     private companion object {
+        // Activity, reader, and playback service instances share one cache directory.
+        // Serialize voice changes, synthesis, and eviction across all of them.
+        val processSynthesisMutex = Mutex()
         const val SPEECH_CACHE_MAX_BYTES = 256L * 1024L * 1024L
         const val SPEECH_CACHE_MAX_AGE_MILLIS = 30L * 24L * 60L * 60L * 1_000L
         const val SPEECH_TEMP_MAX_AGE_MILLIS = 24L * 60L * 60L * 1_000L
