@@ -23,6 +23,7 @@ Text document positions are character offsets; PDF positions are page indexes. T
 
 - Text size for supported text formats
 - Bookmarks and saved position; the open reader follows persisted Read Aloud segment positions
+- EPUB table of contents with navigation to readable spine-chapter starts; in-chapter fragment links are not mapped
 - Search in supported text formats; PDF search requires API 35+ and extractable page text
 - Read Aloud from the current text page with generated speech offsets mapped back to the source document; Markdown syntax cleanup preserves source indexes
 

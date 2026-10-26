@@ -1,57 +1,18 @@
-# Murmur TTS (Text-to-Speech)
+# Murmur Read Aloud
 
-## Architecture
+## Implemented path
 
-Murmur's TTS system is built around the `SpeechGenerator` interface, with two implementations:
+The reader asks `SystemTtsSpeechGenerator` to synthesize the current document page with Android's installed `TextToSpeech` engine. Generated WAV files are cached under the app cache directory and queued through the shared Media3 playback service. The service can synthesize the next page for continuous reading and saves a document character offset (or PDF page index) at segment boundaries and playback lifecycle events.
 
-### SystemTtsSpeechGenerator
-
-Uses Android's built-in TextToSpeech engine:
-- Voice selection with language and locale
-- Strict offline mode: blocks voices known to require network access
-- WAV cache with SHA-256 keys
-- Pronunciation filtering support
-
-### NeuralTtsSpeechGenerator (Optional)
-
-Uses Sherpa-ONNX for neural TTS:
-- Lazy model loading
-- Model manifest with checksums and license verification
-- Speaker selection
-- Reflection-based API access (to avoid hard dependency)
-
-## SpeechGenerator Interface
-
-```kotlin
-interface SpeechGenerator {
-    val currentSynthesisIdentity: SynthesisIdentity
-    fun maxSpeechInputLength(): Int
-    suspend fun synthesize(text: String, identity: SynthesisIdentity): File
-}
-```
-
-## TTS Cache
-
-Generated speech is cached locally with SHA-256 keys derived from:
-- Text content
-- Voice and engine identity
-- Pronunciation version
-- Synthesis-affecting settings
-
-Cache files are written atomically (temp file → rename) to prevent corruption.
-
-## TTS Scheduler
-
-Bounded generation with:
-- Look-ahead buffer (bounded by time, not count)
-- Sentence segmentation respecting engine limits
-- Cancellation on seek
-- Cache lookup before generation
-- Process-death recovery via Room checkpointing
+Voice selection and synthesis are serialized across generator instances in the process because the Activity, reader, and playback service can each own an engine instance while sharing the cache. Cache files are keyed with SHA-256 over synthesis identity, voice identity, and chunk text. Cache eviction is size/age based and avoids deleting files currently referenced by the playback queue.
 
 ## Strict Offline Speech
 
-When enabled:
-- Blocks voices known to require network access
-- Does not silently fall back to network-required speech
-- Reports "Unknown" when Android cannot determine network requirement
+When Strict Offline Speech is enabled, Murmur rejects a voice reported as network-required, a voice whose network requirement is unknown, and missing voice data. Android's TTS service supplies the voice metadata and performs synthesis; behavior can differ by engine and installed voice data. An uncached offline synthesis run must be verified on a device before making a device-specific claim.
+
+## Limits and deferred code
+
+- Reader following and recovery are segment-level. Murmur does not highlight the active sentence or continuously synchronize scroll position to audio time.
+- The optional neural generator is not implemented. Neural manifest/settings models do not provide a synthesis engine or model-management UI.
+- The separate `TtsScheduler` and `BatchTtsManager` classes are not constructed by the app. `TtsScheduler` currently has no source-text provider (`extractSectionText()` returns empty text) and closes its queue on seek; do not integrate it as-is.
+- Batch/full-book export, neural model downloads, cloud speech, and OCR are not part of the current implementation.
