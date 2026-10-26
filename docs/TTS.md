@@ -8,7 +8,7 @@ Voice selection and synthesis are serialized across generator instances in the p
 
 ## Strict Offline Speech
 
-When Strict Offline Speech is enabled, Murmur rejects a voice reported as network-required, a voice whose network requirement is unknown, and missing voice data. Android's TTS service supplies the voice metadata and performs synthesis; behavior can differ by engine and installed voice data. An uncached offline synthesis run must be verified on a device before making a device-specific claim.
+When Strict Offline Speech is enabled, Murmur rejects a voice reported as network-required, a voice whose network requirement is unknown, and voice data marked as not installed. It checks this before calling Android's `setVoice`, which may trigger a data download or allow synthesis to substitute another voice. Android's TTS service supplies the voice metadata and performs synthesis; behavior can differ by engine and installed voice data. An uncached offline synthesis run must be verified on a device before making a device-specific claim.
 
 ## Limits and deferred code
 

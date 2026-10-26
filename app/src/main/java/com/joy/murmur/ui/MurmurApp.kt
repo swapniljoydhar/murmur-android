@@ -1015,10 +1015,12 @@ private fun ReaderScreen(
         if (position == null || position != savedPosition) position = savedPosition
     }
     LaunchedEffect(repository, documentId) { repository?.observeBookmarks(documentId)?.collect { bookmarks = it } }
-    LaunchedEffect(speechGenerator, selectedSpeechVoice) {
+    LaunchedEffect(speechGenerator, selectedSpeechVoice, strictOffline) {
+        speechError = null
         runCatching {
-            speechGenerator.selectVoice(selectedSpeechVoice)
             speechVoices = speechGenerator.availableVoices()
+            voiceNetworkRequirement = speechGenerator.voiceNetworkRequirement(selectedSpeechVoice)
+            speechGenerator.selectVoice(selectedSpeechVoice, strictOffline)
             voiceNetworkRequirement = speechGenerator.voiceNetworkRequirement()
         }.onFailure { failure ->
             speechError = failure.message ?: "System speech isn't available on this device."
@@ -2225,8 +2227,11 @@ Button(onClick = { launchTtsSettings = true }) { Text("Open TTS Settings") }
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 availableVoices.forEach { voice ->
                     val requirement = if (voice.name == selectedVoice) voiceEligibility
-                        else if (voice.requiresNetwork) VoiceNetworkRequirement.NETWORK_REQUIRED
-                        else VoiceNetworkRequirement.KNOWN_OFFLINE
+                        else when {
+                            voice.requiresNetwork -> VoiceNetworkRequirement.NETWORK_REQUIRED
+                            voice.requiresInstall -> VoiceNetworkRequirement.MISSING_DATA
+                            else -> VoiceNetworkRequirement.KNOWN_OFFLINE
+                        }
 
                     OutlinedCard(
                         modifier = Modifier.fillMaxWidth(),
@@ -2272,7 +2277,7 @@ Button(onClick = { launchTtsSettings = true }) { Text("Open TTS Settings") }
             }
 
             if (strictOffline && availableVoices.none { it.name == selectedVoice && voiceEligibility == VoiceNetworkRequirement.KNOWN_OFFLINE }) {
-                val hasOfflineVoice = availableVoices.any { !it.requiresNetwork }
+                val hasOfflineVoice = availableVoices.any { !it.requiresNetwork && !it.requiresInstall }
                 if (!hasOfflineVoice) {
                     Column(Modifier.fillMaxWidth().padding(top = 16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         Text(

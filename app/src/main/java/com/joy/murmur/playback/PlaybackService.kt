@@ -429,7 +429,7 @@ class PlaybackService : MediaSessionService() {
 
             val generator = getTtsGenerator()
             try {
-                generator.selectVoice(selectedVoice)
+                generator.selectVoice(selectedVoice, strictOffline)
                 val speechText = if (document.mimeType == "text/markdown") ReadAloudUtils.markdownForSpeech(sourcePage) else sourcePage
                 val identity = SynthesisIdentity(
                     engine = "android_tts",
@@ -518,7 +518,7 @@ class PlaybackService : MediaSessionService() {
 
             val generator = getTtsGenerator()
             try {
-                generator.selectVoice(selectedVoice)
+                generator.selectVoice(selectedVoice, strictOffline)
                 val speechText = if (document.mimeType == "text/markdown") ReadAloudUtils.markdownForSpeech(sourcePage) else sourcePage
                 val identity = SynthesisIdentity(
                     engine = "android_tts",

@@ -32,9 +32,35 @@ import kotlinx.coroutines.withTimeout
 
 enum class VoiceNetworkRequirement { KNOWN_OFFLINE, NETWORK_REQUIRED, UNKNOWN, UNAVAILABLE, MISSING_DATA }
 
-data class SpeechVoiceOption(val name: String, val localeTag: String, val requiresNetwork: Boolean) {
+internal fun classifyVoiceNetworkRequirement(requiresNetwork: Boolean, requiresInstall: Boolean): VoiceNetworkRequirement = when {
+    requiresNetwork -> VoiceNetworkRequirement.NETWORK_REQUIRED
+    requiresInstall -> VoiceNetworkRequirement.MISSING_DATA
+    else -> VoiceNetworkRequirement.KNOWN_OFFLINE
+}
+
+internal fun strictOfflineVoiceFailure(requirement: VoiceNetworkRequirement, strictOffline: Boolean): String? = when {
+    requirement == VoiceNetworkRequirement.UNAVAILABLE -> "The system speech engine isn't available on this device."
+    strictOffline && requirement == VoiceNetworkRequirement.NETWORK_REQUIRED ->
+        "The selected system voice requires a network connection. Turn off Strict Offline Speech to use it."
+    strictOffline && requirement == VoiceNetworkRequirement.UNKNOWN ->
+        "This system voice's network requirement is unknown. Turn off Strict Offline Speech only if you accept that it may use a network."
+    strictOffline && requirement == VoiceNetworkRequirement.MISSING_DATA ->
+        "This voice needs additional data and may download or substitute another voice. Install its data before using it with Strict Offline Speech."
+    else -> null
+}
+
+data class SpeechVoiceOption(
+    val name: String,
+    val localeTag: String,
+    val requiresNetwork: Boolean,
+    val requiresInstall: Boolean = false,
+) {
     val label: String
-        get() = "${localeTag.ifBlank { "Unknown language" }} · ${if (requiresNetwork) "Network required" else "On device"}"
+        get() = "${localeTag.ifBlank { "Unknown language" }} · ${when {
+            requiresNetwork -> "Network required"
+            requiresInstall -> "Voice data missing"
+            else -> "On device"
+        }}"
 }
 
 data class GeneratedSpeechFile(val file: File, val segmentIndex: Int, val sourceOffset: Int, val sentenceIds: List<String> = emptyList())
@@ -101,30 +127,59 @@ class SystemTtsSpeechGenerator(context: Context) {
         })
     }
 
-    suspend fun voiceNetworkRequirement(): VoiceNetworkRequirement {
+    suspend fun voiceNetworkRequirement(voiceName: String? = null): VoiceNetworkRequirement {
         if (runCatching { awaitReady() }.isFailure) return VoiceNetworkRequirement.UNAVAILABLE
-        return engine.voice?.let { voice ->
-            if (voice.isNetworkConnectionRequired) VoiceNetworkRequirement.NETWORK_REQUIRED else VoiceNetworkRequirement.KNOWN_OFFLINE
+        val voice = if (voiceName.isNullOrBlank()) {
+            engine.voice
+        } else {
+            engine.voices.orEmpty().firstOrNull { it.name == voiceName }
+                ?: return VoiceNetworkRequirement.UNAVAILABLE
+        }
+        return voice?.let {
+            classifyVoiceNetworkRequirement(
+                requiresNetwork = it.isNetworkConnectionRequired,
+                requiresInstall = TextToSpeech.Engine.KEY_FEATURE_NOT_INSTALLED in it.features.orEmpty(),
+            )
         } ?: VoiceNetworkRequirement.UNKNOWN
     }
 
     suspend fun availableVoices(): List<SpeechVoiceOption> {
         awaitReady()
         return engine.voices.orEmpty()
-            .map { voice -> SpeechVoiceOption(voice.name, voice.locale.toLanguageTag(), voice.isNetworkConnectionRequired) }
+            .map { voice ->
+                SpeechVoiceOption(
+                    name = voice.name,
+                    localeTag = voice.locale.toLanguageTag(),
+                    requiresNetwork = voice.isNetworkConnectionRequired,
+                    requiresInstall = TextToSpeech.Engine.KEY_FEATURE_NOT_INSTALLED in voice.features.orEmpty(),
+                )
+            }
             .distinctBy(SpeechVoiceOption::name)
             .sortedWith(compareBy(SpeechVoiceOption::localeTag, SpeechVoiceOption::requiresNetwork, SpeechVoiceOption::name))
     }
 
-    suspend fun selectVoice(voiceName: String?) {
+    suspend fun selectVoice(voiceName: String?, strictOffline: Boolean) {
         synthesisMutex.withLock {
             awaitReady()
             if (voiceName.isNullOrBlank()) {
-                engine.voice = engine.defaultVoice
+                val defaultVoice = engine.defaultVoice
+                val requirement = defaultVoice?.let {
+                    classifyVoiceNetworkRequirement(
+                        requiresNetwork = it.isNetworkConnectionRequired,
+                        requiresInstall = TextToSpeech.Engine.KEY_FEATURE_NOT_INSTALLED in it.features.orEmpty(),
+                    )
+                } ?: VoiceNetworkRequirement.UNKNOWN
+                strictOfflineVoiceFailure(requirement, strictOffline)?.let { throw IllegalStateException(it) }
+                engine.voice = defaultVoice
                 return@withLock
             }
             val selected = engine.voices.orEmpty().firstOrNull { it.name == voiceName }
                 ?: throw IllegalArgumentException("That speech voice is no longer installed on this device.")
+            val requirement = classifyVoiceNetworkRequirement(
+                requiresNetwork = selected.isNetworkConnectionRequired,
+                requiresInstall = TextToSpeech.Engine.KEY_FEATURE_NOT_INSTALLED in selected.features.orEmpty(),
+            )
+            strictOfflineVoiceFailure(requirement, strictOffline)?.let { throw IllegalStateException(it) }
             check(engine.setVoice(selected) == TextToSpeech.SUCCESS) { "The system speech engine couldn't select that voice." }
         }
     }
@@ -143,13 +198,7 @@ class SystemTtsSpeechGenerator(context: Context) {
 
     suspend fun synthesize(text: String, identity: String, strictOffline: Boolean): List<GeneratedSpeechFile> = synthesisMutex.withLock {
         awaitReady()
-        when (voiceNetworkRequirement()) {
-            VoiceNetworkRequirement.NETWORK_REQUIRED -> if (strictOffline) throw IllegalStateException("The selected system voice requires a network connection. Turn off Strict Offline Speech to use it.")
-            VoiceNetworkRequirement.UNKNOWN -> if (strictOffline) throw IllegalStateException("This system voice's network requirement is unknown. Turn off Strict Offline Speech only if you accept that it may use a network.")
-            VoiceNetworkRequirement.UNAVAILABLE -> throw IllegalStateException("The system speech engine isn't available on this device.")
-            VoiceNetworkRequirement.KNOWN_OFFLINE -> Unit
-            VoiceNetworkRequirement.MISSING_DATA -> if (strictOffline) throw IllegalStateException("Voice data is missing. Install voice data while online or choose a different voice.")
-        }
+        strictOfflineVoiceFailure(voiceNetworkRequirement(), strictOffline)?.let { throw IllegalStateException(it) }
         val queuedFiles = playbackStore.queue().mapNotNull { item ->
             Uri.parse(item.uri).takeIf { it.scheme == "file" }?.path
         }.toSet()
