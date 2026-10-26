@@ -75,11 +75,13 @@ This is a selective comparison of product direction, not a full hands-on review 
 
 1. Map Continue → Music/Audiobooks/Read & Listen → player/reader → resume after process death.
 2. Connect the document source to Read Aloud; keep the generated TTS item in the internal playback path and restore the exact document location on pause, seek, stop, failure, and process recreation.
-3. Complete TTS cancellation, queue replacement, cache concurrency, voice-data errors, missing URI permission, playback failure, and strict-offline no-fallback behavior. Prove new uncached synthesis with Wi-Fi/mobile data disabled.
+3. Implement TTS cancellation, queue replacement, cache concurrency, voice-data errors, missing URI permission, playback failure, and strict-offline no-fallback behavior. Defer proof of uncached offline synthesis on a physical device to the final device-validation gate after all implementation phases.
 4. Keep the unused `TtsScheduler`/batch generation path out of the core flow. If future product work selects it, implement and validate the complete lifecycle instead of reusing the current incomplete classes.
 5. Make empty, loading, missing-file, unsupported-format, and no-offline-voice states understandable and recoverable.
 
-**Exit:** reader-to-speech-to-reader round-trip works on a physical device, including an uncached segment offline, and state survives process recreation without selecting a network-required voice under strict mode.
+**Implementation exit:** the reader-to-speech-to-reader path, durable position handling, and strict-offline guards are implemented; the exact tree passes unit tests and builds both app and instrumentation APKs. P0 implementation is complete at `981d137`.
+
+**Deferred final acceptance:** physical reader-to-speech-to-reader behavior, uncached synthesis with connectivity disabled, process recreation, and actual TTS-engine behavior remain unverified. Per the user's sequencing request, perform these device checks only after implementation phases P0–P5 are complete; do not treat source/build evidence as device acceptance.
 
 ### P1 — Reader correctness, anchors, and bounded work
 
@@ -151,7 +153,7 @@ This is a selective comparison of product direction, not a full hands-on review 
 7. P5 accessibility, security, licensing, compatibility, and release validation.
 8. Reconsider optional neural TTS, batch export, lyrics, tag editing, extra formats, and Android Auto after core acceptance and user prioritization.
 
-Do not begin a broad architecture rewrite. For each slice, inspect adjacent code and migrations, make a narrow change, add focused tests when implementation begins, build the exact tree, inspect the diff, and record device checks/limitations before calling it complete.
+Do not begin a broad architecture rewrite. For each slice, inspect adjacent code and migrations, make a narrow change, add focused tests when implementation begins, build the exact tree, inspect the diff, and record source/build evidence. Defer all physical-device acceptance checks until P0–P5 implementation is complete, then run them as one final gate.
 
 ## Validation update — 2026-10-26
 
