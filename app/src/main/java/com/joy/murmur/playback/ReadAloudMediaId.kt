@@ -82,6 +82,7 @@ fun parseReadAloudMediaId(mediaId: String): ReadAloudSegmentInfo? {
         else -> return null
     }
     val sourceOffset = fields[5].toLongOrNull() ?: return null
+    if (!isValidReadAloudSourceRange(pageStart, pageLength, sourceOffset)) return null
     val cacheKey = fields[6]
     val sectionId = fields.getOrNull(7)?.takeIf { it.isNotBlank() }
     val paragraphId = fields.getOrNull(8)?.takeIf { it.isNotBlank() }
@@ -94,8 +95,9 @@ fun parseReadAloudMediaId(mediaId: String): ReadAloudSegmentInfo? {
     val documentFingerprint = fields.getOrNull(15)?.takeIf { it.isNotBlank() }
     val parseVersion = fields.getOrNull(16)?.toIntOrNull() ?: 1
 
+    val documentId = Uri.decode(fields[1]).takeIf(String::isNotBlank) ?: return null
     return ReadAloudSegmentInfo(
-        documentId = Uri.decode(fields[1]),
+        documentId = documentId,
         pageStart = pageStart,
         pageLength = pageLength,
         continuous = continuous,
@@ -113,6 +115,13 @@ fun parseReadAloudMediaId(mediaId: String): ReadAloudSegmentInfo? {
         parseVersion = parseVersion,
     )
 }
+
+internal fun isValidReadAloudSourceRange(pageStart: Long, pageLength: Int, sourceOffset: Long): Boolean =
+    pageStart >= 0L &&
+        pageStart < Long.MAX_VALUE &&
+        pageLength >= 0 &&
+        pageStart <= Long.MAX_VALUE - pageLength &&
+        sourceOffset in 0L..pageLength.toLong()
 
 /**
  * Creates a cache identity string from synthesis parameters.
