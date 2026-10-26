@@ -1,7 +1,7 @@
 ﻿package com.joy.murmur.domain.audiobooks
 
 enum class ChapterSource {
-    CONTAINER, ID3, VORBIS, HEURISTIC
+    CONTAINER, ID3, VORBIS, HEURISTIC, UNKNOWN
 }
 
 data class AudiobookChapter(

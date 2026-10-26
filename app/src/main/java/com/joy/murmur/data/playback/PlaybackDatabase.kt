@@ -3,6 +3,7 @@ package com.joy.murmur.data.playback
 import android.content.Context
 import androidx.room.Dao
 import androidx.room.Database
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.Embedded
 import androidx.room.ForeignKey
@@ -96,6 +97,7 @@ data class AudiobookChapterEntity(
     val title: String,
     val startMs: Long,
     val endMs: Long?,
+    @ColumnInfo(defaultValue = "'UNKNOWN'") val source: String = "UNKNOWN",
 )
 
 @Entity(tableName = "processor_settings")
@@ -179,6 +181,8 @@ data class ReaderDocumentEntity(
     val mimeType: String,
     val addedAtMillis: Long,
     val positionChars: Long,
+    val positionFingerprint: String? = null,
+    @ColumnInfo(defaultValue = "1") val positionAnchorVersion: Int = 1,
 )
 
 @Entity(
@@ -416,6 +420,9 @@ interface PlaybackDao {
     @Query("UPDATE reader_documents SET positionChars = :positionChars WHERE id = :documentId")
     suspend fun updateReaderPosition(documentId: String, positionChars: Long)
 
+    @Query("UPDATE reader_documents SET positionChars = :positionChars, positionFingerprint = :fingerprint, positionAnchorVersion = :anchorVersion WHERE id = :documentId")
+    suspend fun updateReaderSourcePosition(documentId: String, positionChars: Long, fingerprint: String?, anchorVersion: Int)
+
     @Query("DELETE FROM reader_documents WHERE id = :documentId")
     suspend fun deleteReaderDocument(documentId: String)
 
@@ -462,6 +469,9 @@ interface PlaybackDao {
     // Document structure methods
     @Query("SELECT * FROM document_structures WHERE documentId = :documentId")
     suspend fun getDocumentStructure(documentId: String): DocumentStructureEntity?
+
+    @Query("DELETE FROM document_structures WHERE documentId = :documentId")
+    suspend fun deleteDocumentStructure(documentId: String)
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertDocumentStructure(entity: DocumentStructureEntity)
@@ -510,7 +520,7 @@ interface PlaybackDao {
 
 @Database(
     entities = [QueueItemEntity::class, PlaybackStateEntity::class, ListeningProgressEntity::class, AudiobookEntity::class, AudiobookBookmarkEntity::class, AudiobookChapterEntity::class, MusicTrackEntity::class, MusicCatalogStateEntity::class, MusicPlaylistEntity::class, MusicPlaylistTrackEntity::class, ReaderDocumentEntity::class, ReaderBookmarkEntity::class, DocumentStructureEntity::class, BatchJobEntity::class, BatchWorkUnitEntity::class, ProcessorSettingsEntity::class],
-    version = 13,
+    version = 15,
     exportSchema = true,
 )
 abstract class PlaybackDatabase : RoomDatabase() {
@@ -525,7 +535,7 @@ abstract class PlaybackDatabase : RoomDatabase() {
                 context.applicationContext,
                 PlaybackDatabase::class.java,
                 "murmur.db",
-            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13).build().also { instance = it }
+            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15).build().also { instance = it }
         }
 
         private val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -608,6 +618,19 @@ abstract class PlaybackDatabase : RoomDatabase() {
         private val MIGRATION_12_13 = object : Migration(12, 13) {
             override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
                 db.execSQL("CREATE TABLE IF NOT EXISTS processor_settings (id INTEGER NOT NULL, replayGainEnabled INTEGER NOT NULL DEFAULT 0, equalizerEnabled INTEGER NOT NULL DEFAULT 0, crossfeedEnabled INTEGER NOT NULL DEFAULT 0, headroomEnabled INTEGER NOT NULL DEFAULT 0, balanceEnabled INTEGER NOT NULL DEFAULT 0, ditherEnabled INTEGER NOT NULL DEFAULT 0, updatedAtMillis INTEGER NOT NULL, PRIMARY KEY(id))")
+            }
+        }
+
+        internal val MIGRATION_13_14 = object : Migration(13, 14) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE reader_documents ADD COLUMN positionFingerprint TEXT")
+                db.execSQL("ALTER TABLE reader_documents ADD COLUMN positionAnchorVersion INTEGER NOT NULL DEFAULT 1")
+            }
+        }
+
+        internal val MIGRATION_14_15 = object : Migration(14, 15) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE audiobook_chapters ADD COLUMN source TEXT NOT NULL DEFAULT 'UNKNOWN'")
             }
         }
     }
@@ -791,10 +814,26 @@ class ReaderDocumentStore(private val database: PlaybackDatabase) {
 
     fun observeDocuments(): Flow<List<ReaderDocumentEntity>> = dao.observeReaderDocuments()
     fun observeBookmarks(documentId: String): Flow<List<ReaderBookmarkEntity>> = dao.observeReaderBookmarks(documentId)
-    suspend fun saveDocuments(documents: List<ReaderDocumentEntity>) = dao.upsertReaderDocuments(documents)
+    suspend fun saveDocuments(documents: List<ReaderDocumentEntity>) = database.withTransaction {
+        dao.upsertReaderDocuments(documents)
+        documents.forEach { dao.deleteDocumentStructure(it.id) }
+    }
     suspend fun getDocument(documentId: String): ReaderDocumentEntity? = dao.getReaderDocument(documentId)
     suspend fun savePosition(documentId: String, positionChars: Long) = dao.updateReaderPosition(documentId, positionChars)
-    suspend fun removeDocument(documentId: String) = dao.deleteReaderDocument(documentId)
+    suspend fun updateReaderSourcePosition(
+        documentId: String,
+        positionChars: Long,
+        fingerprint: String?,
+        anchorVersion: Int,
+        invalidateStructure: Boolean,
+    ) = database.withTransaction {
+        dao.updateReaderSourcePosition(documentId, positionChars, fingerprint, anchorVersion)
+        if (invalidateStructure) dao.deleteDocumentStructure(documentId)
+    }
+    suspend fun removeDocument(documentId: String) = database.withTransaction {
+        dao.deleteReaderDocument(documentId)
+        dao.deleteDocumentStructure(documentId)
+    }
     suspend fun saveBookmark(bookmark: ReaderBookmarkEntity) = dao.insertReaderBookmark(bookmark)
     suspend fun removeBookmark(bookmarkId: String) = dao.deleteReaderBookmark(bookmarkId)
 

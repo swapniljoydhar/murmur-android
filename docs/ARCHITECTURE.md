@@ -31,9 +31,9 @@ MediaSessionService
 ## Speech Layer
 
 - **SystemTtsSpeechGenerator**: System TTS with voice selection, strict offline mode
-- **TtsScheduler**: Bounded TTS generation with look-ahead buffer
 - **TtsCache**: Local WAV cache with SHA-256 keys
-- **NeuralTtsSpeechGenerator**: Optional Sherpa-ONNX neural TTS
+
+The separate `TtsScheduler` and `BatchTtsManager` are not wired into the app. Neural TTS is not implemented.
 
 ## UI Layer
 
@@ -43,8 +43,8 @@ MediaSessionService
 
 ## Key Design Decisions
 
-1. **Local-first**: No INTERNET permission, all data stays on device
+1. **Local-first**: No INTERNET permission; app-managed data stays in app storage, while source media remains at user-selected locations
 2. **Single playback owner**: No independent players per screen
 3. **Process death resilience**: Position persisted to Room on pause, item transition, lifecycle events
 4. **Bounded TTS generation**: No unbounded pre-generation for long documents
-5. **OEM compatibility**: Diagnostics for background playback restrictions
+5. **OEM compatibility**: Android background limits still apply; broad OEM-specific resilience is not device-validated

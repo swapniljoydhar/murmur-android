@@ -1,50 +1,29 @@
 # Murmur
 
-Murmur is an Android-only, local-first media and reading application centered around music, audiobooks, documents, and Read Aloud.
+Murmur is an Android-only, local-first app for music, audiobooks, documents, and system Read Aloud.
 
-## Core Philosophy
+## Current app
 
-> **Simple enough to understand immediately. Powerful enough to keep using for years.**
+- Local music browsing, playlists, and background playback through a shared Media3 session
+- Audiobook library, resume position, bookmarks, and available embedded chapters
+- TXT, Markdown, HTML, EPUB, and PDF reading, with format-specific limits documented in [docs/READER.md](docs/READER.md)
+- Android system TextToSpeech playback for supported reader content; strict offline voice checks are available
+- Room-backed feature data, DataStore preferences, and validated logical backup/restore
 
-Murmur may contain sophisticated engineering underneath the UI, but users should not have to understand that complexity.
+These are implemented code paths, not a claim of complete device acceptance. Read [planning/PROJECT_STATUS.md](planning/PROJECT_STATUS.md) for current evidence and limitations.
 
-## Features
+## Architecture and privacy
 
-### Music
-- Local music library with MusicStore integration
-- Playlists, queue management, search
-- Background playback via MediaSessionService
+- Single Android app module; namespace and application ID `com.joy.murmur`
+- Minimum API 26; target API 37 in the current project configuration
+- UI, domain, and data packages; Room for feature data and DataStore for preferences
+- No `INTERNET` permission. Android system TTS engines may have their own network behavior; Murmur's strict offline option filters voices using system-reported metadata.
+- Android OS cloud backup and device-transfer are excluded; user-controlled backup uses Murmur's validated logical format.
 
-### Audiobooks
-- M4B, M4A, MP3 support
-- Per-book position and chapter tracking
-- Playback speed control, bookmarks
-- 200+ hour audiobook support
+## Build
 
-### Documents
-- TXT, Markdown, HTML, EPUB, PDF support
-- Structural parsing with lazy rendering
-- Read Aloud with sentence-level TTS
+Use the checked-in Gradle Wrapper and a compatible Android SDK. Build commands and verification status are recorded in [planning/VALIDATION.md](planning/VALIDATION.md). Dependency and license review scope is documented in [docs/LICENSING.md](docs/LICENSING.md).
 
-### Read Aloud
-- System TTS and optional neural TTS (Sherpa-ONNX)
-- Bounded speech generation with look-ahead buffer
-- Tap-to-read, return-to-text
-- Strict offline speech mode
+## Product documentation
 
-## Architecture
-
-- **Single playback owner**: PlaybackController → PlaybackService → ExoPlayer → MediaSession
-- **Local-first**: No INTERNET permission, all data stored locally
-- **Room + DataStore**: Durable persistence for positions, bookmarks, settings
-- **MediaSessionService**: Background playback with lock screen controls
-
-## Requirements
-
-- Android API 26+
-- No internet permission required for normal operation
-- Local media files only
-
-## License
-
-See docs/LICENSING.md for dependency licensing information.
+See [docs/](docs/) for reader, Read Aloud, storage, and other feature limits. The Markdown files under `planning/` are project/agent planning records, not app source, runtime configuration, or authorization to implement deferred work.

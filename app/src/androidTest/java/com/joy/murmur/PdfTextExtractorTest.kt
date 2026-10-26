@@ -11,6 +11,7 @@ import com.joy.murmur.data.documents.PdfTextExtractor
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertThrows
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
@@ -47,6 +48,9 @@ class PdfTextExtractorTest {
         try {
             val text = PdfTextExtractor.extractPageText(context, Uri.fromFile(pdfFile), 0)
             assertEquals(null, text)
+            assertThrows(IllegalArgumentException::class.java) {
+                runBlocking { PdfTextExtractor.searchDocument(context, Uri.fromFile(pdfFile), "missing", 10) }
+            }
         } finally {
             pdfFile.delete()
         }

@@ -83,9 +83,9 @@ Those edits include end-of-page reader-progress synchronization, cross-generator
 | 6. System TTS | Partial | Platform synthesis, offline policy, voice selection, bounded chunks/cache, and text-page continuation exist; reliable source mapping/sentence sync, seek/repeat/return-to-text, error behavior, cross-generator cache concurrency, process-death continuation, and device validation remain. |
 | 7. Long-form hardening | Planned / partial | No evidence yet for 200+ hour audiobook or TTS acceptance, process-death continuation, bounded scheduler measurements, or extreme seek/race/storage-full acceptance. |
 | 8. Neural TTS | Deferred optional | Must not block the system-TTS baseline; evaluate only with user approval, offline/license/native-library audit, and measurable benefit. |
-| 9. Audio quality | Partial / planned | Shared Media3 path exists; ReplayGain, headroom/clipping, actual effects/output-route honesty, and measurement are not a complete sound suite. Avoid fake bit-perfect/gapless claims. |
+| 9. Audio quality | Deferred / not implemented | Murmur processors are not connected to ExoPlayer; ReplayGain is not applied. The misleading Sound screen and unsupported bit-perfect/gapless/output claims were removed. Device route/audio-quality validation remains deferred. |
 | 10. Native Android integration | Partial | MediaSession/notification and SAF/MediaStore paths exist; home-screen widget, shortcuts/deep links, full route/noisy/audio-focus and platform version matrix need audit. Android Auto remains out of scope. |
-| 11. Storage / backup | Planned | No verified backup/restore UX, transaction snapshot, conflict handling, or storage-center operation. Do not copy source media implicitly. |
+| 11. Storage / backup | Implemented baseline | Versioned, checksummed logical backup with schema validation, preview, explicit replacement confirmation, and transactional restore is available from Settings. Preferences, playback queue/state, source files, generated speech, and SAF grants are excluded. SAF/device acceptance remains deferred. |
 | 12. OEM resilience | Planned | Work scheduling exists for catalog refresh; no verified OEM diagnostic flow, reboot/background matrix, or truthful battery-policy guidance. Never promise OEM settings defeat OS limits. |
 | 13. Performance / accessibility / security hardening | Partial / planned | Some size/input bounds and local-only architecture exist; no complete low-end performance, TalkBack, contrast, rapid-interaction, permissions, parser fuzz, or release security report. |
 
@@ -144,3 +144,13 @@ Validation on this exact source tree succeeded for `:app:assembleDebug`, `:app:t
 5. Update code documentation and this status doc only after evidence exists; add/fix tests when the behavior changes.
 6. Once feature work is complete, run the validation walkthrough, install/launch on the connected phone, and report exactly which scenarios passed and which were not run.
 7. Commit source separately from planning docs where practical; push the new commit to the existing private repository. Do not force-push again unless the current user explicitly requests rewriting an existing remote history.
+
+## P5 implementation update — 2026-10-27
+
+This is the latest P5 record; older snapshot sections above are historical. P5 removes an unused exact-alarm permission, explicitly excludes app-private data from Android cloud/device-transfer backup rules, cleans stale dependency catalog entries, and corrects README/architecture/storage/licensing scope. The app's in-app logical backup remains available and separately documented. No `INTERNET` permission was introduced.
+
+P5 exact-tree validation passed: `.\gradlew.bat test lintDebug assembleDebug assembleDebugAndroidTest assembleRelease` completed successfully. The unit reports contain 64 tests with zero failures/errors; lint reports zero errors, 41 warnings, and one hint. Debug and release merged manifests contain no `INTERNET`, `SCHEDULE_EXACT_ALARM`, or `POST_NOTIFICATIONS`; the release APK built unsigned, and instrumentation sources compiled but were not executed. The native strip warnings for `libandroidx.graphics.path.so` and `libdatastore_shared_counter.so` remain non-fatal.
+
+This is not physical-device acceptance. TalkBack, touch-target measurement, contrast on real displays, large-font/layout behavior, notifications, API 26–current runtime behavior, OEM lifecycle, SAF provider behavior, and instrumentation execution remain in the deferred device gate. The dependency licensing document identifies direct dependency families but does not claim a complete transitive SBOM/legal audit. Neural TTS and full-book export remain deferred.
+
+P5 implementation commit `924ac7a` (`chore(p5): harden backup and release documentation`) was pushed successfully to `origin/main`. The working tree should be checked after this status-only follow-up is committed.

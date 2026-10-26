@@ -13,12 +13,6 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
-import com.joy.murmur.playback.BalanceProcessor
-import com.joy.murmur.playback.CrossfeedProcessor
-import com.joy.murmur.playback.DitherProcessor
-import com.joy.murmur.playback.EqualizerProcessor
-import com.joy.murmur.playback.HeadroomLimiterProcessor
-import com.joy.murmur.playback.ReplayGainProcessor
 import com.joy.murmur.data.playback.PlaybackDatabase
 import com.joy.murmur.data.playback.PlaybackStore
 import com.joy.murmur.data.playback.PlaybackRestorePolicy
@@ -58,22 +52,17 @@ class PlaybackService : MediaSessionService() {
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val persistenceMutex = Mutex()
+    private val readAloudPositionMutex = Mutex()
+    private val readAloudPositionWrites = ReadAloudPositionWriteTracker()
     private lateinit var player: ExoPlayer
     private lateinit var sleepTimer: SleepTimer
     private lateinit var store: PlaybackStore
-    private lateinit var replayGainProcessor: ReplayGainProcessor
-    private lateinit var equalizerProcessor: EqualizerProcessor
-    private lateinit var crossfeedProcessor: CrossfeedProcessor
-    private lateinit var headroomLimiterProcessor: HeadroomLimiterProcessor
-    private lateinit var balanceProcessor: BalanceProcessor
-    private lateinit var ditherProcessor: DitherProcessor
     private var mediaSession: MediaSession? = null
     private var restorationComplete = false
     private var continuationJob: Job? = null
     @Volatile private var continuationDocumentId: String? = null
     @Volatile private var readAloudStartJob: Job? = null
     @Volatile private var readAloudStartDocumentId: String? = null
-    private val processors = mutableListOf<MurmurAudioProcessor>()
 
     // Single shared TTS generator instance
     private var ttsGenerator: SystemTtsSpeechGenerator? = null
@@ -81,17 +70,6 @@ class PlaybackService : MediaSessionService() {
     override fun onCreate() {
         super.onCreate()
         store = PlaybackStore(PlaybackDatabase.getInstance(this))
-
-        replayGainProcessor = ReplayGainProcessor()
-        equalizerProcessor = EqualizerProcessor()
-        crossfeedProcessor = CrossfeedProcessor()
-        headroomLimiterProcessor = HeadroomLimiterProcessor()
-        balanceProcessor = BalanceProcessor()
-        ditherProcessor = DitherProcessor()
-        processors.addAll(listOf(
-            replayGainProcessor, equalizerProcessor, crossfeedProcessor,
-            headroomLimiterProcessor, balanceProcessor, ditherProcessor
-        ))
 
         player = ExoPlayer.Builder(this)
             .build()
@@ -147,7 +125,7 @@ class PlaybackService : MediaSessionService() {
                     continuationJob = null
                     continuationDocumentId = null
                 }
-                serviceScope.launch(Dispatchers.IO) { runCatching { persistReadAloudPosition(segment) } }
+                persistReadAloudPositionAsync(segment)
                 updateReplayGainForCurrentTrack()
             }
 
@@ -173,10 +151,15 @@ class PlaybackService : MediaSessionService() {
             }
 
             override fun onPlayerError(error: PlaybackException) {
-                val segment = player.currentMediaItem?.mediaId?.let(::parseReadAloudMediaId) ?: return
+                val segment = player.currentMediaItem?.mediaId?.let(::parseReadAloudMediaId)
+                if (segment == null) {
+                    serviceScope.launch { persistPlayerState() }
+                    return
+                }
+                val writeToken = readAloudPositionWrites.begin(segment.documentId)
                 serviceScope.launch(Dispatchers.IO) {
                     try {
-                        persistReadAloudPosition(segment)
+                        persistReadAloudPosition(segment, writeToken)
                     } catch (cancelled: CancellationException) {
                         throw cancelled
                     } catch (_: Exception) {
@@ -254,8 +237,11 @@ class PlaybackService : MediaSessionService() {
         // Persist final state synchronously
         val savedState = snapshotPlayerState()
         val readAloudSegment = player.currentMediaItem?.mediaId?.let(::parseReadAloudMediaId)
+        val readAloudPositionToken = readAloudSegment?.let { readAloudPositionWrites.begin(it.documentId) }
         runBlocking(Dispatchers.IO) {
-            readAloudSegment?.let { runCatching { persistReadAloudPosition(it) } }
+            readAloudSegment?.let { segment ->
+                readAloudPositionToken?.let { token -> runCatching { persistReadAloudPosition(segment, token) } }
+            }
             persistSnapshot(savedState)
         }
 
@@ -265,14 +251,6 @@ class PlaybackService : MediaSessionService() {
             release()
         }
         mediaSession = null
-
-        // Release audio processors (if they have a release method)
-        processors.forEach {
-            if (it is AutoCloseable) {
-                try { it.close() } catch (_: Exception) {}
-            }
-        }
-        processors.clear()
 
         sleepTimer.shutdown()
 
@@ -359,7 +337,7 @@ class PlaybackService : MediaSessionService() {
 
     private fun persistCurrentReadAloudPosition() {
         val segment = player.currentMediaItem?.mediaId?.let(::parseReadAloudMediaId) ?: return
-        serviceScope.launch(Dispatchers.IO) { runCatching { persistReadAloudPosition(segment) } }
+        persistReadAloudPositionAsync(segment)
     }
 
     private fun cancelReadAloudWork() {
@@ -371,15 +349,31 @@ class PlaybackService : MediaSessionService() {
         readAloudStartDocumentId = null
     }
 
-    private suspend fun persistReadAloudPosition(segment: ReadAloudSegmentInfo) {
-        val documents = ReaderDocumentStore(PlaybackDatabase.getInstance(this@PlaybackService))
-        val document = documents.getDocument(segment.documentId)
-        val position = if (document?.mimeType == "application/pdf") {
-            segment.pageStart
-        } else {
-            segment.pageStart + segment.sourceOffset
+    private fun persistReadAloudPositionAsync(segment: ReadAloudSegmentInfo) {
+        val writeToken = readAloudPositionWrites.begin(segment.documentId)
+        serviceScope.launch(Dispatchers.IO) {
+            runCatching { persistReadAloudPosition(segment, writeToken) }
         }
-        documents.savePosition(segment.documentId, position)
+    }
+
+    private suspend fun persistReadAloudPosition(segment: ReadAloudSegmentInfo, writeToken: Long) {
+        readAloudPositionMutex.withLock {
+            try {
+                if (!readAloudPositionWrites.isCurrent(segment.documentId, writeToken)) return@withLock
+                val documents = ReaderDocumentStore(PlaybackDatabase.getInstance(this@PlaybackService))
+                val document = documents.getDocument(segment.documentId)
+                val position = if (document?.mimeType == "application/pdf") {
+                    segment.pageStart
+                } else {
+                    segment.pageStart + segment.sourceOffset
+                }
+                if (readAloudPositionWrites.isCurrent(segment.documentId, writeToken)) {
+                    documents.savePosition(segment.documentId, position)
+                }
+            } finally {
+                readAloudPositionWrites.finish(segment.documentId, writeToken)
+            }
+        }
     }
 
     private suspend fun continueReadAloud(segment: ReadAloudSegmentInfo, endedItem: MediaItem) {
@@ -407,7 +401,7 @@ class PlaybackService : MediaSessionService() {
 
             val generator = getTtsGenerator()
             try {
-                generator.selectVoice(selectedVoice)
+                generator.selectVoice(selectedVoice, strictOffline)
                 val speechText = if (document.mimeType == "text/markdown") ReadAloudUtils.markdownForSpeech(sourcePage) else sourcePage
                 val identity = SynthesisIdentity(
                     engine = "android_tts",
@@ -496,7 +490,7 @@ class PlaybackService : MediaSessionService() {
 
             val generator = getTtsGenerator()
             try {
-                generator.selectVoice(selectedVoice)
+                generator.selectVoice(selectedVoice, strictOffline)
                 val speechText = if (document.mimeType == "text/markdown") ReadAloudUtils.markdownForSpeech(sourcePage) else sourcePage
                 val identity = SynthesisIdentity(
                     engine = "android_tts",

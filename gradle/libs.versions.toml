@@ -14,14 +14,12 @@ androidxTest = "1.7.0"
 androidxTestExt = "1.3.0"
 espresso = "3.7.0"
 glance = "1.2.0"
-glanceWear = "1.0.0-alpha20"
 kotlinxSerialization = "1.8.0"
 kotlinxCoroutines = "1.8.0"
 kotlinxCoroutinesTest = "1.8.0"
 documentfile = "1.1.0"
 appcompat = "1.6.1"
 cardview = "1.0.0"
-# sherpaOnnx = "1.12.6"  # Uncomment when AAR is available
 
 [libraries]
 androidx-activity-compose = { module = "androidx.activity:activity-compose", version.ref = "activityCompose" }
@@ -32,6 +30,8 @@ androidx-compose-ui-tooling-preview = { module = "androidx.compose.ui:ui-tooling
 androidx-compose-ui-tooling = { module = "androidx.compose.ui:ui-tooling" }
 androidx-compose-ui-test-junit4 = { module = "androidx.compose.ui:ui-test-junit4" }
 androidx-compose-ui-test-manifest = { module = "androidx.compose.ui:ui-test-manifest" }
+androidx-compose-material-icons-core = { module = "androidx.compose.material:material-icons-core" }
+androidx-compose-material-icons-extended = { module = "androidx.compose.material:material-icons-extended" }
 androidx-navigation-compose = { module = "androidx.navigation:navigation-compose", version.ref = "navigationCompose" }
 androidx-datastore-preferences = { module = "androidx.datastore:datastore-preferences", version.ref = "datastore" }
 androidx-work-runtime = { module = "androidx.work:work-runtime", version.ref = "work" }
@@ -42,7 +42,6 @@ androidx-media3-exoplayer = { module = "androidx.media3:media3-exoplayer", versi
 androidx-media3-session = { module = "androidx.media3:media3-session", version.ref = "media3" }
 androidx-media3-inspector = { module = "androidx.media3:media3-inspector", version.ref = "media3" }
 androidx-glance-appwidget = { module = "androidx.glance:glance-appwidget", version.ref = "glance" }
-androidx-glance-wear = { module = "androidx.glance.wear:wear", version.ref = "glanceWear" }
 junit = { module = "junit:junit", version.ref = "junit" }
 androidx-test-core = { module = "androidx.test:core-ktx", version.ref = "androidxTest" }
 androidx-test-runner = { module = "androidx.test:runner", version.ref = "androidxTest" }
@@ -53,7 +52,6 @@ androidx-documentfile = { module = "androidx.documentfile:documentfile", version
 kotlinx-coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", version.ref = "kotlinxCoroutinesTest" }
 androidx-appcompat = { module = "androidx.appcompat:appcompat", version.ref = "appcompat" }
 androidx-cardview = { module = "androidx.cardview:cardview", version.ref = "cardview" }
-# sherpa-onnx = { module = "com.k2-fsa:sherpa-onnx", version.ref = "sherpaOnnx" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

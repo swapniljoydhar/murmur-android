@@ -9,7 +9,6 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
-    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <permission
         android:name="com.joy.murmur.permission.PLAYBACK_SERVICE"
         android:protectionLevel="signature" />

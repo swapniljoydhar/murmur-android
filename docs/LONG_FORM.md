@@ -1,8 +1,10 @@
 # Murmur Long-Form Architecture
 
-## Long Audiobooks (200+ Hours)
+## Long Audiobooks
 
-Murmur treats long audiobooks as a first-class use case. A 200+ hour M4B remains one logical audiobook unless the user explicitly requests splitting.
+Playback positions, durations, chapter timestamps, and sleep-timer calculations use `Long` milliseconds. A model-level regression fixture covers a 237-hour duration and positions beyond `Int.MAX_VALUE`; this verifies storage/value range only. It does not establish successful 237-hour playback, distant decoder seeks, process-death recovery, or acceptable performance. Do not claim those outcomes until the final device acceptance gate passes.
+
+Murmur does not split a selected audiobook into artificial files. The app stores one library item for each selected URI.
 
 ### File Handling
 
@@ -13,7 +15,7 @@ Murmur treats long audiobooks as a first-class use case. A 200+ hour M4B remains
 
 ### Time Types
 
-All time values use `Long` (milliseconds) to support durations beyond `Int.MAX_VALUE`:
+Persisted and service-side time values use `Long` (milliseconds):
 - Duration
 - Position
 - Chapter timestamps
@@ -29,13 +31,11 @@ Uses actual chapter metadata from the container. If the platform exposes chapter
 
 ### Resume
 
-Per-book persistence of:
+Per-book progress storage contains:
 - Position (Long, milliseconds)
-- Current chapter (when available)
-- Completion state
-- Playback preferences
+- Duration (Long, milliseconds)
 
-Book A and Book B never share one global position.
+Progress records are keyed by media ID, so playback snapshots for Book A and Book B are stored separately. End-to-end switching and process-death behavior still requires device acceptance. Current chapter and audiobook-specific playback preferences are not persisted separately.
 
 ## Huge Documents
 
@@ -127,5 +127,6 @@ Process death during:
 ## Known Limitations
 
 - Neural TTS requires optional Sherpa-ONNX AAR (license audit required)
-- 200+ hour batch generation respects Android background limits
+- Long-form values are model/storage-tested only; actual playback duration, distant seeking, process-death recovery, and performance are unverified
+- Full-book batch speech generation is not integrated into the app
 - PDF text extraction is best-effort (no OCR in v1)

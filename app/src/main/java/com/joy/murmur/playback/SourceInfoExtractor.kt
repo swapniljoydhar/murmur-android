@@ -480,34 +480,3 @@ data class SourceInfo(
     val replayGainAlbum: Float? = null,  // Album gain in dB
     val replayGainPeak: Float? = null,   // Peak value (0.0-1.0+)
 )
-
-/**
- * Information about active audio processing.
- */
-data class ProcessingInfo(
-    val replayGainEnabled: Boolean,
-    val replayGainStatus: String,
-    val equalizerEnabled: Boolean,
-    val equalizerStatus: String,
-    val crossfeedEnabled: Boolean,
-    val crossfeedStatus: String,
-    val headroomEnabled: Boolean,
-    val headroomStatus: String,
-    val balanceEnabled: Boolean,
-    val balanceStatus: String,
-    val ditherEnabled: Boolean,
-    val ditherStatus: String,
-)
-
-/**
- * Information about the audio output device.
- */
-data class OutputInfo(
-    val route: String,
-    val deviceName: String,
-    val outputSampleRate: Int,
-    val outputBitDepth: Int,
-    val outputChannels: String,
-    val latencyMs: Int,
-    val volume: Float,
-)

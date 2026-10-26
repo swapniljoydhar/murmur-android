@@ -5,12 +5,14 @@ import android.graphics.Bitmap
 import android.graphics.pdf.PdfRenderer
 import android.net.Uri
 import android.text.Html
+import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import com.joy.murmur.data.playback.DocumentStructureEntity
 import com.joy.murmur.data.playback.ReaderBookmarkEntity
 import com.joy.murmur.data.playback.ReaderDocumentEntity
 import com.joy.murmur.data.playback.ReaderDocumentStore
 import com.joy.murmur.domain.documents.DocumentLibraryRepository
+import com.joy.murmur.domain.documents.CURRENT_READER_POSITION_ANCHOR_VERSION
 import com.joy.murmur.domain.documents.DocumentSearchMatch
 import com.joy.murmur.domain.documents.DocumentStructure
 import com.joy.murmur.domain.documents.PdfPage
@@ -18,6 +20,7 @@ import com.joy.murmur.domain.documents.ReaderBookmark
 import com.joy.murmur.domain.documents.ReaderDocument
 import com.joy.murmur.domain.documents.Section
 import com.joy.murmur.playback.toStableMediaId
+import com.joy.murmur.playback.generateDocumentFingerprint
 import com.joy.murmur.data.documents.PdfTextExtractor
 import com.joy.murmur.data.documents.EpubParser
 import com.joy.murmur.data.documents.TocEntry
@@ -67,13 +70,43 @@ class RoomDocumentLibraryRepository(context: Context, private val store: ReaderD
                 extension == "pdf" || mime == "application/pdf" -> "application/pdf"
                 else -> "text/plain"
             }
-            ReaderDocumentEntity(uri.toStableMediaId(), uri.toString(), name.substringBeforeLast('.', name), normalizedMime, System.currentTimeMillis(), 0L)
+            ReaderDocumentEntity(
+                id = uri.toStableMediaId(),
+                uri = uri.toString(),
+                title = name.substringBeforeLast('.', name),
+                mimeType = normalizedMime,
+                addedAtMillis = System.currentTimeMillis(),
+                positionChars = 0L,
+                positionFingerprint = sourceFingerprint(uri),
+                positionAnchorVersion = CURRENT_READER_POSITION_ANCHOR_VERSION,
+            )
         }
         store.saveDocuments(rows)
         rows.size
     }
 
     override suspend fun removeDocument(documentId: String) = store.removeDocument(documentId)
+
+    override suspend fun validateDocumentSource(documentId: String): Boolean = withContext(Dispatchers.IO) {
+        val document = store.getDocument(documentId) ?: throw IllegalArgumentException("Document not found")
+        val fingerprint = sourceFingerprint(Uri.parse(document.uri))
+        val update = resolveReaderPositionAnchor(
+            positionChars = document.positionChars,
+            savedFingerprint = document.positionFingerprint,
+            currentFingerprint = fingerprint,
+            savedVersion = document.positionAnchorVersion,
+        )
+        if (update.shouldPersist) {
+            store.updateReaderSourcePosition(
+                documentId = documentId,
+                positionChars = update.positionChars,
+                fingerprint = update.fingerprint,
+                anchorVersion = update.version,
+                invalidateStructure = update.sourceChanged || (document.positionFingerprint == null && fingerprint != null),
+            )
+        }
+        update.didReset
+    }
 
     override suspend fun savePosition(documentId: String, positionChars: Long) = store.savePosition(documentId, positionChars.coerceAtLeast(0L))
 
@@ -118,6 +151,9 @@ class RoomDocumentLibraryRepository(context: Context, private val store: ReaderD
                         "This PDF page has no extractable text. Scanned PDFs are not supported."
                     }
                 )
+        }
+        require(startChar <= DocumentIndexer.MAX_TEXT_CHARACTERS) {
+            "This reading position is beyond Murmur's current 50 MB text limit."
         }
         if (document.mimeType == "text/html") return@withContext readHtmlPage(document, startChar, maxChars)
         if (document.mimeType == "application/epub+zip") return@withContext readEpubPage(document.uri, startChar, maxChars)
@@ -207,7 +243,9 @@ class RoomDocumentLibraryRepository(context: Context, private val store: ReaderD
                     val count = pushback.read(prefix)
                     val (charset, bomBytes) = detectCharset(prefix, count)
                     if (count > bomBytes) pushback.unread(prefix, bomBytes, count - bomBytes)
-                    InputStreamReader(pushback, charset).use { reader -> searchReader(reader, needle, safeLimit) }
+                    InputStreamReader(pushback, charset).use { reader ->
+                        searchReaderBounded(reader, needle, safeLimit)
+                    }
                 }
             }
         }
@@ -286,36 +324,6 @@ class RoomDocumentLibraryRepository(context: Context, private val store: ReaderD
         return bookText.toString()
     }
 
-    private suspend fun searchReader(reader: Reader, query: String, limit: Int): List<DocumentSearchMatch> {
-        val matches = mutableListOf<DocumentSearchMatch>()
-        val buffer = CharArray(8192)
-        var consumed = 0L
-        var tail = ""
-        while (matches.size < limit) {
-            currentCoroutineContext().ensureActive()
-            val count = reader.read(buffer)
-            if (count < 0) break
-            if (count == 0) continue
-            val window = tail + String(buffer, 0, count)
-            val windowStart = consumed - tail.length
-            var searchFrom = (tail.length - query.length + 1).coerceAtLeast(0)
-            while (matches.size < limit) {
-                val index = window.indexOf(query, searchFrom, ignoreCase = true)
-                if (index < 0) break
-                if (index + query.length > tail.length) {
-                    matches += DocumentSearchMatch(
-                        positionChars = (windowStart + index).coerceAtLeast(0L),
-                        snippet = snippetAround(window, index, query.length),
-                    )
-                }
-                searchFrom = index + 1
-            }
-            consumed += count
-            tail = window.takeLast((query.length - 1).coerceAtLeast(0))
-        }
-        return matches
-    }
-
     private suspend fun searchText(text: String, query: String, limit: Int): List<DocumentSearchMatch> {
         val matches = mutableListOf<DocumentSearchMatch>()
         var searchFrom = 0
@@ -327,14 +335,6 @@ class RoomDocumentLibraryRepository(context: Context, private val store: ReaderD
             searchFrom = index + 1
         }
         return matches
-    }
-
-    private fun snippetAround(text: String, matchIndex: Int, queryLength: Int): String {
-        val start = (matchIndex - 48).coerceAtLeast(0)
-        val end = (matchIndex + queryLength + 72).coerceAtMost(text.length)
-        val prefix = if (start > 0) "â€¦" else ""
-        val suffix = if (end < text.length) "â€¦" else ""
-        return prefix + text.substring(start, end).replace(Regex("\\s+"), " ").trim() + suffix
     }
 
     private fun htmlToPlainText(source: String): String = Html.fromHtml(
@@ -352,6 +352,28 @@ class RoomDocumentLibraryRepository(context: Context, private val store: ReaderD
         }
         return uri.lastPathSegment?.substringAfterLast('/')?.takeIf(String::isNotBlank) ?: "Untitled document"
     }
+
+    // shortcut: provider metadata can miss same-size rewrites with unchanged timestamps; upgrade to content hashing if providers prove unreliable.
+    private fun sourceFingerprint(uri: Uri): String? = runCatching {
+        appContext.contentResolver.query(
+            uri,
+            arrayOf(OpenableColumns.SIZE, DocumentsContract.Document.COLUMN_LAST_MODIFIED),
+            null,
+            null,
+            null,
+        )?.use { cursor ->
+            if (!cursor.moveToFirst()) return@runCatching null
+            val sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE)
+            val modifiedIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_LAST_MODIFIED)
+            if (sizeIndex < 0 || modifiedIndex < 0 || cursor.isNull(sizeIndex) || cursor.isNull(modifiedIndex)) {
+                null
+            } else {
+                val size = cursor.getLong(sizeIndex)
+                val modified = cursor.getLong(modifiedIndex)
+                if (size < 0L || modified < 0L) null else generateDocumentFingerprint(uri, modified, size)
+            }
+        }
+    }.getOrNull()
 
     private fun detectCharset(prefix: ByteArray, count: Int): Pair<Charset, Int> = when {
         count >= 3 && prefix[0] == 0xEF.toByte() && prefix[1] == 0xBB.toByte() && prefix[2] == 0xBF.toByte() -> Charsets.UTF_8 to 3
@@ -384,6 +406,81 @@ class RoomDocumentLibraryRepository(context: Context, private val store: ReaderD
         const val MAX_EPUB_UNCOMPRESSED_BYTES = 64L * 1024L * 1024L
         const val MAX_PDF_PIXELS = 4_000_000L
     }
+}
+
+internal suspend fun searchReaderBounded(
+    reader: Reader,
+    query: String,
+    limit: Int,
+    maxCharacters: Long = DocumentIndexer.MAX_TEXT_CHARACTERS,
+): List<DocumentSearchMatch> {
+    val matches = mutableListOf<DocumentSearchMatch>()
+    val buffer = CharArray(8192)
+    var consumed = 0L
+    var tail = ""
+    while (matches.size < limit) {
+        currentCoroutineContext().ensureActive()
+        val readLimit = minOf(buffer.size.toLong(), maxCharacters - consumed + 1L).coerceAtLeast(1L).toInt()
+        val count = reader.read(buffer, 0, readLimit)
+        if (count < 0) break
+        if (count == 0) continue
+        require(consumed + count <= maxCharacters) {
+            "Document search is limited to ${maxCharacters / 1024 / 1024} MB of text."
+        }
+        val window = tail + String(buffer, 0, count)
+        val windowStart = consumed - tail.length
+        var searchFrom = (tail.length - query.length + 1).coerceAtLeast(0)
+        while (matches.size < limit) {
+            val index = window.indexOf(query, searchFrom, ignoreCase = true)
+            if (index < 0) break
+            if (index + query.length > tail.length) {
+                matches += DocumentSearchMatch(
+                    positionChars = (windowStart + index).coerceAtLeast(0L),
+                    snippet = snippetAround(window, index, query.length),
+                )
+            }
+            searchFrom = index + 1
+        }
+        consumed += count
+        tail = window.takeLast((query.length - 1).coerceAtLeast(0))
+    }
+    return matches
+}
+
+private fun snippetAround(text: String, matchIndex: Int, queryLength: Int): String {
+    val start = (matchIndex - 48).coerceAtLeast(0)
+    val end = (matchIndex + queryLength + 72).coerceAtMost(text.length)
+    val prefix = if (start > 0) "…" else ""
+    val suffix = if (end < text.length) "…" else ""
+    return prefix + text.substring(start, end).replace(Regex("\\s+"), " ").trim() + suffix
+}
+
+internal data class ReaderPositionAnchorUpdate(
+    val positionChars: Long,
+    val fingerprint: String?,
+    val version: Int,
+    val didReset: Boolean,
+    val shouldPersist: Boolean,
+    val sourceChanged: Boolean,
+)
+
+internal fun resolveReaderPositionAnchor(
+    positionChars: Long,
+    savedFingerprint: String?,
+    currentFingerprint: String?,
+    savedVersion: Int,
+): ReaderPositionAnchorUpdate {
+    val sourceChanged = savedFingerprint != null && currentFingerprint != null && savedFingerprint != currentFingerprint
+    val versionChanged = savedVersion != CURRENT_READER_POSITION_ANCHOR_VERSION
+    val reset = sourceChanged || versionChanged
+    return ReaderPositionAnchorUpdate(
+        positionChars = if (reset) 0L else positionChars,
+        fingerprint = currentFingerprint ?: savedFingerprint,
+        version = CURRENT_READER_POSITION_ANCHOR_VERSION,
+        didReset = reset,
+        shouldPersist = currentFingerprint != null || versionChanged,
+        sourceChanged = sourceChanged,
+    )
 }
 
 private fun DocumentStructureEntity.toDomain(): DocumentStructure {

@@ -12,6 +12,7 @@ import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -66,8 +67,12 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.navigation.NavHostController
@@ -88,17 +93,21 @@ import com.joy.murmur.domain.music.MusicPlaylistRepository
 import com.joy.murmur.domain.music.MusicPlaylistTrack
 import com.joy.murmur.data.music.MusicCatalogRefreshScheduler
 import com.joy.murmur.domain.audiobooks.Audiobook
+import com.joy.murmur.domain.audiobooks.ChapterSource
 import com.joy.murmur.domain.audiobooks.AudiobookLibraryRepository
 import com.joy.murmur.domain.documents.DocumentLibraryRepository
 import com.joy.murmur.domain.documents.ReaderDocument
 import com.joy.murmur.domain.documents.PdfPage
 import com.joy.murmur.domain.documents.DocumentSearchMatch
+import com.joy.murmur.data.documents.TocEntry
 import com.joy.murmur.data.speech.SystemTtsSpeechGenerator
 import com.joy.murmur.data.speech.SpeechVoiceOption
 import com.joy.murmur.data.speech.VoiceNetworkRequirement
 import com.joy.murmur.playback.PlaybackContentType
 import com.joy.murmur.playback.PlaybackController
 import com.joy.murmur.playback.PlaybackSnapshot
+import com.joy.murmur.playback.playbackPositionAtFraction
+import com.joy.murmur.playback.playbackPositionFraction
 import com.joy.murmur.playback.ReadAloudStatus
 import com.joy.murmur.playback.parseReadAloudMediaId
 import com.joy.murmur.playback.SleepTimer
@@ -141,6 +150,7 @@ private enum class Destination(val route: String, val title: String, val descrip
 private enum class SettingsTab(val label: String) {
     APPEARANCE("Appearance"),
     VOICE("Read Aloud Voice"),
+    STORAGE("Storage"),
 }
 
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
@@ -252,7 +262,7 @@ private fun MurmurNavigation(
             ReaderScreen(entry.arguments?.getString("documentId").orEmpty(), documentLibraryRepository, playbackController, settingsRepository)
         }
         composable(Destination.Settings.route) {
-            SettingsScreen(settingsRepository)
+            SettingsScreen(settingsRepository, playback.current != null)
         }
         composable(Destination.OemFix.route) {
             val fixLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { _ ->
@@ -283,11 +293,17 @@ private fun MurmurNavigation(
             )
         }
         composable(Destination.NowPlaying.route) {
-            NowPlayingScreen(playback, playbackController, audiobookLibraryRepository) {
-                val documentId = playback.current?.id?.split('|')?.getOrNull(1)?.let(Uri::decode)
-                if (documentId != null) navController.navigate("reader/${Uri.encode(documentId)}")
-                else navController.navigate(Destination.Documents.route)
-            }
+            NowPlayingScreen(
+                snapshot = playback,
+                controller = playbackController,
+                audiobookLibraryRepository = audiobookLibraryRepository,
+                onReturnToDocument = {
+                    val documentId = playback.current?.id?.split('|')?.getOrNull(1)?.let(Uri::decode)
+                    if (documentId != null) navController.navigate("reader/${Uri.encode(documentId)}")
+                    else navController.navigate(Destination.Documents.route)
+                },
+                onOpenAudiobookLibrary = { navController.navigate(Destination.Audiobooks.route) },
+            )
         }
     }
 }
@@ -938,6 +954,8 @@ private fun ReaderScreen(
     var searching by remember(documentId) { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var loading by remember { mutableStateOf(false) }
+    var checkingSource by remember(documentId) { mutableStateOf(true) }
+    var sourceChanged by remember(documentId) { mutableStateOf(false) }
     var synthesizing by remember { mutableStateOf(false) }
     var speechError by remember { mutableStateOf<String?>(null) }
     var voiceNetworkRequirement by remember { mutableStateOf(VoiceNetworkRequirement.UNKNOWN) }
@@ -947,6 +965,10 @@ private fun ReaderScreen(
     val document = documents.firstOrNull { it.id == documentId }
     val documentReadAloudFailure = readAloudFailure?.takeIf { it.documentId == documentId }
     var bookmarks by remember { mutableStateOf<List<com.joy.murmur.domain.documents.ReaderBookmark>>(emptyList()) }
+    var epubContents by remember(documentId) { mutableStateOf<List<TocEntry>>(emptyList()) }
+    var showEpubContents by remember(documentId) { mutableStateOf(false) }
+    var loadingEpubContents by remember(documentId) { mutableStateOf(false) }
+    var epubContentsError by remember(documentId) { mutableStateOf<String?>(null) }
 
     fun startReadAloud(continuous: Boolean) {
         val currentDocument = document ?: return
@@ -1005,24 +1027,40 @@ private fun ReaderScreen(
     }
 
     LaunchedEffect(repository) { repository?.observeDocuments()?.collect { documents = it } }
+    LaunchedEffect(repository, documentId) {
+        checkingSource = true
+        sourceChanged = false
+        try {
+            sourceChanged = repository?.validateDocumentSource(documentId) ?: false
+            if (sourceChanged) position = 0L
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            sourceChanged = false
+        } finally {
+            checkingSource = false
+        }
+    }
     LaunchedEffect(document?.id, document?.positionChars) {
         val savedPosition = document?.positionChars ?: return@LaunchedEffect
-        if (position == null || position != savedPosition) position = savedPosition
+        if (!sourceChanged && (position == null || position != savedPosition)) position = savedPosition
     }
     LaunchedEffect(repository, documentId) { repository?.observeBookmarks(documentId)?.collect { bookmarks = it } }
-    LaunchedEffect(speechGenerator, selectedSpeechVoice) {
+    LaunchedEffect(speechGenerator, selectedSpeechVoice, strictOffline) {
+        speechError = null
         runCatching {
-            speechGenerator.selectVoice(selectedSpeechVoice)
             speechVoices = speechGenerator.availableVoices()
+            voiceNetworkRequirement = speechGenerator.voiceNetworkRequirement(selectedSpeechVoice)
+            speechGenerator.selectVoice(selectedSpeechVoice, strictOffline)
             voiceNetworkRequirement = speechGenerator.voiceNetworkRequirement()
         }.onFailure { failure ->
             speechError = failure.message ?: "System speech isn't available on this device."
         }
     }
-    LaunchedEffect(repository, document?.uri, position) {
+    LaunchedEffect(repository, document?.uri, position, checkingSource) {
         val current = document
         val start = position
-        if (repository != null && current != null && start != null) {
+        if (!checkingSource && repository != null && current != null && start != null) {
             loading = true
             error = null
             try {
@@ -1057,6 +1095,40 @@ private fun ReaderScreen(
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        if (sourceChanged) {
+            Text(
+                "This document or its saved position format changed. Reading restarted at the beginning; saved bookmarks were kept and may need review.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+        if (document?.mimeType == "application/epub+zip") {
+            TextButton(
+                enabled = !loadingEpubContents && repository != null,
+                onClick = {
+                    if (epubContents.isNotEmpty()) {
+                        showEpubContents = true
+                    } else {
+                        scope.launch {
+                            loadingEpubContents = true
+                            epubContentsError = null
+                            try {
+                                epubContents = repository?.getEpubToc(documentId).orEmpty()
+                                if (epubContents.isEmpty()) epubContentsError = "This EPUB has no readable contents list."
+                                else showEpubContents = true
+                            } catch (cancelled: CancellationException) {
+                                throw cancelled
+                            } catch (failure: Exception) {
+                                epubContentsError = failure.message ?: "Murmur couldn't load this book's contents."
+                            } finally {
+                                loadingEpubContents = false
+                            }
+                        }
+                    }
+                },
+            ) { Text(if (loadingEpubContents) "Loading contents…" else "Contents") }
+            epubContentsError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+        }
         if (document?.mimeType != "application/pdf" || Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM) {
             if (document?.mimeType != "application/pdf") {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
@@ -1229,6 +1301,38 @@ private fun ReaderScreen(
                             titleSmall = type.titleSmall.copy(fontSize = type.titleSmall.fontSize * readerTextScale),
                         ),
                     ) { MarkdownReaderContent(page) }
+                } else if (document?.mimeType == "text/plain") {
+                    val pageStart = position ?: document.positionChars
+                    var textLayout by remember(page) { mutableStateOf<TextLayoutResult?>(null) }
+                    Text(
+                        "Tap text to set a reading position, then choose Read from here.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        text = page,
+                        modifier = Modifier
+                            .pointerInput(page, pageStart) {
+                                detectTapGestures { tapOffset ->
+                                    val offset = textLayout?.getOffsetForPosition(tapOffset) ?: return@detectTapGestures
+                                    previousPages.clear()
+                                    position = pageStart + offset.coerceIn(0, page.lastIndex)
+                                }
+                            }
+                            .semantics {
+                                onClick(label = "Set reading position to the beginning of this passage") {
+                                    previousPages.clear()
+                                    position = pageStart
+                                    true
+                                }
+                            },
+                        style = MaterialTheme.typography.bodyLarge.copy(
+                            color = MaterialTheme.colorScheme.onSurface,
+                            fontSize = MaterialTheme.typography.bodyLarge.fontSize * readerTextScale,
+                            lineHeight = MaterialTheme.typography.bodyLarge.lineHeight * readerTextScale * 1.45f,
+                        ),
+                        onTextLayout = { textLayout = it },
+                    )
                 } else {
                     Text(
                         page,
@@ -1242,6 +1346,7 @@ private fun ReaderScreen(
         } else Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
             Text(
                 when {
+                    checkingSource -> "Checking document source…"
                     loading -> "Loading document…"
                     document == null -> "Choose a supported document from Documents."
                     error != null -> "The document is unavailable."
@@ -1320,6 +1425,37 @@ private fun ReaderScreen(
                 }
             },
             confirmButton = { TextButton(onClick = { showVoicePicker = false }) { Text("Done") } },
+        )
+    }
+    if (showEpubContents) {
+        AlertDialog(
+            onDismissRequest = { showEpubContents = false },
+            title = { Text("Contents") },
+            text = {
+                Column(Modifier.fillMaxWidth().height(360.dp).verticalScroll(rememberScrollState())) {
+                    epubContents.forEach { entry ->
+                        TextButton(
+                            onClick = {
+                                entry.positionChars?.let { target ->
+                                    previousPages.clear()
+                                    position = target
+                                }
+                                showEpubContents = false
+                            },
+                            enabled = entry.positionChars != null,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text(
+                                entry.title,
+                                modifier = Modifier.fillMaxWidth().padding(start = ((entry.level - 1).coerceAtLeast(0) * 16).dp),
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { showEpubContents = false }) { Text("Close") } },
         )
     }
 }
@@ -1718,6 +1854,7 @@ private fun NowPlayingScreen(
     controller: PlaybackController?,
     audiobookLibraryRepository: AudiobookLibraryRepository?,
     onReturnToDocument: () -> Unit,
+    onOpenAudiobookLibrary: () -> Unit,
 ) {
     val current = snapshot.current
     if (current == null) {
@@ -1730,7 +1867,7 @@ private fun NowPlayingScreen(
             audiobookLibraryRepository?.observeBooks()?.collect { books = it }
         }
         val artwork = books.firstOrNull { it.id == current.id }?.coverArt
-        AudiobookPlayerScreen(snapshot, controller, artwork, audiobookLibraryRepository)
+        AudiobookPlayerScreen(snapshot, controller, artwork, audiobookLibraryRepository, onOpenAudiobookLibrary)
         return
     }
     if (current.contentType == PlaybackContentType.READ_ALOUD) {
@@ -1820,6 +1957,7 @@ private fun AudiobookPlayerScreen(
     controller: PlaybackController?,
     artwork: ByteArray?,
     audiobookRepository: AudiobookLibraryRepository?,
+    onOpenAudiobookLibrary: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
     val current = snapshot.current ?: return
@@ -1835,7 +1973,6 @@ private fun AudiobookPlayerScreen(
     }
     val speedSteps = listOf(0.75f, 1f, 1.25f, 1.5f, 1.75f, 2f)
     val speedIndex = speedSteps.indices.minByOrNull { kotlin.math.abs(speedSteps[it] - snapshot.playbackSpeed) } ?: 1
-    val duration = snapshot.durationMs.coerceAtLeast(1L)
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 22.dp, vertical = 22.dp),
         verticalArrangement = Arrangement.spacedBy(20.dp),
@@ -1848,11 +1985,18 @@ private fun AudiobookPlayerScreen(
             current.subtitle?.let { Text(it, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant) }
         }
         SleepTimerControl(controller)
+        if (snapshot.hasPlaybackError) {
+            Text(
+                "Playback stopped. Check that the file is still available and that Murmur has access to it.",
+                color = MaterialTheme.colorScheme.error,
+            )
+            TextButton(onClick = onOpenAudiobookLibrary) { Text("Return to Audiobooks") }
+        }
         Column(Modifier.fillMaxWidth()) {
             Slider(
-                value = snapshot.positionMs.coerceIn(0L, duration).toFloat(),
-                onValueChange = { controller?.seekTo(it.toLong()) },
-                valueRange = 0f..duration.toFloat(),
+                value = playbackPositionFraction(snapshot.positionMs, snapshot.durationMs),
+                onValueChange = { controller?.seekTo(playbackPositionAtFraction(it, snapshot.durationMs)) },
+                valueRange = 0f..1f,
             )
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Text(formatMediaPosition(snapshot.positionMs), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1924,7 +2068,18 @@ private fun AudiobookPlayerScreen(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween,
                     ) {
-                        Text(chapter.title, Modifier.weight(1f), maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        Column(Modifier.weight(1f)) {
+                            Text(chapter.title, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            Text(
+                                when (chapter.source) {
+                                    ChapterSource.CONTAINER, ChapterSource.ID3, ChapterSource.VORBIS -> "Embedded marker"
+                                    ChapterSource.HEURISTIC -> "Estimated marker"
+                                    ChapterSource.UNKNOWN -> "Marker source unknown"
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
                         Text(formatMediaPosition(chapter.startMs), color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
@@ -2002,7 +2157,7 @@ private fun queryDisplayName(resolver: ContentResolver, uri: Uri): String {
 }
 
 @Composable
-private fun SettingsScreen(settingsRepository: SettingsRepository) {
+private fun SettingsScreen(settingsRepository: SettingsRepository, playbackInUse: Boolean) {
     val appearanceMode by settingsRepository.appearanceMode.collectAsState(initial = AppearanceMode.SYSTEM)
     val scope = rememberCoroutineScope()
     var selectedTab by remember { mutableStateOf(SettingsTab.APPEARANCE) }
@@ -2028,6 +2183,7 @@ private fun SettingsScreen(settingsRepository: SettingsRepository) {
                     scope.launch { settingsRepository.setAppearanceMode(mode) }
                 }
                 SettingsTab.VOICE -> VoiceSettingsContent(settingsRepository)
+                SettingsTab.STORAGE -> StorageCenterScreen(playbackInUse)
             }
         }
     }
@@ -2162,8 +2318,11 @@ Button(onClick = { launchTtsSettings = true }) { Text("Open TTS Settings") }
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 availableVoices.forEach { voice ->
                     val requirement = if (voice.name == selectedVoice) voiceEligibility
-                        else if (voice.requiresNetwork) VoiceNetworkRequirement.NETWORK_REQUIRED
-                        else VoiceNetworkRequirement.KNOWN_OFFLINE
+                        else when {
+                            voice.requiresNetwork -> VoiceNetworkRequirement.NETWORK_REQUIRED
+                            voice.requiresInstall -> VoiceNetworkRequirement.MISSING_DATA
+                            else -> VoiceNetworkRequirement.KNOWN_OFFLINE
+                        }
 
                     OutlinedCard(
                         modifier = Modifier.fillMaxWidth(),
@@ -2209,7 +2368,7 @@ Button(onClick = { launchTtsSettings = true }) { Text("Open TTS Settings") }
             }
 
             if (strictOffline && availableVoices.none { it.name == selectedVoice && voiceEligibility == VoiceNetworkRequirement.KNOWN_OFFLINE }) {
-                val hasOfflineVoice = availableVoices.any { !it.requiresNetwork }
+                val hasOfflineVoice = availableVoices.any { !it.requiresNetwork && !it.requiresInstall }
                 if (!hasOfflineVoice) {
                     Column(Modifier.fillMaxWidth().padding(top = 16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         Text(

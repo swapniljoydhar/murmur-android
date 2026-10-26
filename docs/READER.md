@@ -13,20 +13,24 @@ PDF text extraction uses `PdfRenderer.Page.getTextContents()` on API 35+. Below 
 
 ## Reader Data Model
 
-Reader storage currently uses document sections and character ranges for text formats, with PDF positions represented as page indexes. Paragraph/sentence anchors are not currently implemented. Room stores durable application state.
+Reader position anchor version 1 uses a PDF page index for PDF and a UTF-16 character offset in extracted plain text for TXT, Markdown, HTML, and EPUB. Room stores the position, anchor version, and a source fingerprint. Paragraph/sentence anchors and reflow-stable restoration are not implemented.
 
 ## Reader Position
 
-Text document positions are character offsets; PDF positions are page indexes. The reader does not currently provide structural paragraph/sentence restoration or reflow-stable anchors.
+On providers that expose size and last-modified metadata, the source fingerprint combines those values with the document URI. If it changes, Murmur restarts at the beginning, preserves bookmarks, invalidates the cached document index, and asks the reader to review bookmarks. Legacy positions are kept when Murmur first records a fingerprint, and their cached index is rebuilt. If provider metadata is unavailable, the existing position is kept. Metadata fingerprints can miss rewrites with unchanged size and timestamps.
 
 ## Reader Features
 
 - Text size for supported text formats
+- Tap plain TXT text to set the character position used by Read from here; other formats use their available page/chapter-level navigation
 - Bookmarks and saved position; the open reader follows persisted Read Aloud segment positions
+- EPUB table of contents with navigation to readable spine-chapter starts; in-chapter fragment links are not mapped
 - Search in supported text formats; PDF search requires API 35+ and extractable page text
 - Read Aloud from the current text page with generated speech offsets mapped back to the source document; Markdown syntax cleanup preserves source indexes
 
 Read Aloud position following is segment-level. Sentence highlighting and continuous in-page synchronization are not implemented.
+
+Reader text-size and Strict Offline Speech preferences are persisted. Reader themes, reading rulers, auto-scroll, highlights, and notes are not implemented.
 
 If service-side speech generation fails, the player reports the error and offers a route back to the document. The reader can retry from the last saved position. The failure status is process-local; the durable document position remains in Room.
 
@@ -36,4 +40,4 @@ Service restoration ignores unfinished Read Aloud start markers and keeps restor
 
 ## Large Documents
 
-Input and indexing limits exist, but lazy reading and bounded working-set behavior are not yet established for all formats. Large-document performance still needs measurement.
+Current limits are explicit: plain text indexing/search are capped at 50 Mi characters; HTML reading/search at 4 Mi characters; EPUB archive extraction at 64 MiB uncompressed, 16 MiB captured, and 4 MiB per package/chapter entry, with extracted reading text capped at 4 Mi characters; PDF indexing/search at 5,000 pages, rendered pages at 4 million pixels, and extracted text at 1 Mi character per page. Text reader pages are at most 24,000 characters. Parsing and streaming loops check coroutine cancellation between reads/pages/entries. These are safety limits, not measured performance promises; the EPUB parser holds its bounded captured entries in memory, and large-file runtime measurements remain outstanding.

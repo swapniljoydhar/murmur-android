@@ -33,9 +33,44 @@ class EpubParserTest {
     }
 
     @Test
+    fun chapterOffsetsMatchReaderSeparatorsAndSkipEmptyChapters() {
+        val offsets = EpubParser.epubChapterPositions(
+            listOf("one.xhtml" to "A", "empty.xhtml" to "  ", "two.xhtml" to "B"),
+        )
+
+        assertEquals(mapOf("one.xhtml" to 0L, "two.xhtml" to 3L), offsets)
+    }
+
+    @Test
     fun resolveZipPathRejectsTraversalOutsideArchive() {
         assertThrows(IllegalArgumentException::class.java) {
             EpubParser.resolveZipPath("OEBPS/content.opf", "../../outside.xhtml")
+        }
+    }
+
+    @Test
+    fun epubXmlRejectsDoctypeAndExternalEntityDeclarations() {
+        val hostileXml = """
+            <!DOCTYPE package [<!ENTITY external SYSTEM "file:///private/secret">]>
+            <package>&external;</package>
+        """.trimIndent().toByteArray()
+
+        assertThrows(Exception::class.java) { EpubParser.parseXml(hostileXml) }
+    }
+
+    @Test
+    fun archiveRejectsAnOversizedChapterEntry() {
+        val archiveBytes = ByteArrayOutputStream().use { bytes ->
+            ZipOutputStream(bytes).use { zip ->
+                zip.putNextEntry(ZipEntry("chapter.xhtml"))
+                zip.write(ByteArray(EpubParser.MAX_CHAPTER_BYTES.toInt() + 1) { 'x'.code.toByte() })
+                zip.closeEntry()
+            }
+            bytes.toByteArray()
+        }
+
+        assertThrows(IllegalArgumentException::class.java) {
+            ZipInputStream(ByteArrayInputStream(archiveBytes)).use(EpubParser::readEpubEntries)
         }
     }
 

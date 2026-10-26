@@ -119,8 +119,7 @@ class MediaStoreMusicLibraryRepository(context: Context, private val catalogStor
             Manifest.permission.READ_EXTERNAL_STORAGE
         }
         if (ContextCompat.checkSelfPermission(appContext, permission) != PackageManager.PERMISSION_GRANTED) {
-            // Permission lost; trigger full refresh on next scan
-            // Use empty block instead of return
+            throw MusicPermissionRequiredException()
         } else {
             val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)

@@ -127,7 +127,7 @@ internal object EpubParser {
             val navXml = entries[navPath]
             if (navXml != null) {
                 parseNavXhtml(navXml, packagePath, tocEntries)
-                if (tocEntries.isNotEmpty()) return tocEntries
+                if (tocEntries.isNotEmpty()) return withChapterPositions(entries, packagePath, tocEntries)
             }
         }
 
@@ -137,7 +137,7 @@ internal object EpubParser {
             val ncxXml = entries[ncxPath]
             if (ncxXml != null) {
                 parseNcx(ncxXml, packagePath, tocEntries)
-                if (tocEntries.isNotEmpty()) return tocEntries
+                if (tocEntries.isNotEmpty()) return withChapterPositions(entries, packagePath, tocEntries)
             }
         }
 
@@ -150,7 +150,43 @@ internal object EpubParser {
             }
         }
 
-        return tocEntries
+        return withChapterPositions(entries, packagePath, tocEntries)
+    }
+
+    private fun withChapterPositions(
+        entries: Map<String, ByteArray>,
+        packagePath: String,
+        tocEntries: List<TocEntry>,
+    ): List<TocEntry> {
+        val packageBytes = entries[packagePath] ?: return tocEntries
+        val packageDocument = parseXml(packageBytes)
+        val manifest = elements(packageDocument, "item").associate { item ->
+            item.getAttribute("id") to resolveZipPath(packagePath, item.getAttribute("href"))
+        }
+        val chapters = elements(packageDocument, "itemref")
+            .mapNotNull { manifest[it.getAttribute("idref")] }
+            .filter { it.endsWith(".xhtml", true) || it.endsWith(".html", true) || it.endsWith(".htm", true) }
+            .mapNotNull { path ->
+                val chapter = entries[path] ?: return@mapNotNull null
+                path to htmlToPlainText(chapter.toString(Charsets.UTF_8))
+            }
+        val chapterPositions = epubChapterPositions(chapters)
+        return tocEntries.map { entry -> entry.copy(positionChars = chapterPositions[entry.href]) }
+    }
+
+    internal fun epubChapterPositions(chapters: List<Pair<String, String>>): Map<String, Long> {
+        var position = 0L
+        var hasText = false
+        val positions = mutableMapOf<String, Long>()
+        chapters.forEach { (path, text) ->
+            if (text.isNotBlank()) {
+                if (hasText) position += 2
+                positions[path] = position
+                position += text.length
+                hasText = true
+            }
+        }
+        return positions
     }
 
     private fun parseNavXhtml(navBytes: ByteArray, packagePath: String, tocEntries: MutableList<TocEntry>) {
@@ -239,6 +275,7 @@ data class TocEntry(
     val title: String,
     val href: String,
     val level: Int = 1,
+    val positionChars: Long? = null,
 ) {
     val id: String
         get() = "toc_${href.hashCode().toString(36)}"

@@ -93,7 +93,7 @@ class DataStoreSettingsRepository(
     }
 
     override suspend fun checkVoiceEligibility(voiceName: String?): VoiceNetworkRequirement {
-        return ttsGenerator?.voiceNetworkRequirement() ?: VoiceNetworkRequirement.UNKNOWN
+        return ttsGenerator?.voiceNetworkRequirement(voiceName) ?: VoiceNetworkRequirement.UNKNOWN
     }
 
     override suspend fun getAvailableVoices(): List<SpeechVoiceOption> {

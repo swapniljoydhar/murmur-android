@@ -4,6 +4,8 @@ import android.net.Uri
 import com.joy.murmur.data.documents.TocEntry
 import kotlinx.coroutines.flow.Flow
 
+const val CURRENT_READER_POSITION_ANCHOR_VERSION = 1
+
 data class ReaderDocument(
     val id: String,
     val uri: Uri,
@@ -34,6 +36,7 @@ interface DocumentLibraryRepository {
     fun observeBookmarks(documentId: String): Flow<List<ReaderBookmark>>
     suspend fun addDocuments(uris: List<Uri>): Int
     suspend fun removeDocument(documentId: String)
+    suspend fun validateDocumentSource(documentId: String): Boolean
     suspend fun savePosition(documentId: String, positionChars: Long)
     suspend fun addBookmark(documentId: String, positionChars: Long, label: String)
     suspend fun removeBookmark(bookmarkId: String)
