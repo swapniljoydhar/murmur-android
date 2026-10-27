@@ -63,13 +63,21 @@ data class SpeechVoiceOption(
         }}"
 }
 
-data class GeneratedSpeechFile(val file: File, val segmentIndex: Int, val sourceOffset: Int, val sentenceIds: List<String> = emptyList())
+data class GeneratedSpeechFile(
+    val file: File,
+    val segmentIndex: Int,
+    val sourceOffset: Int,
+    val sentenceIds: List<String> = emptyList(),
+    val sentenceStartOffsets: List<Int> = emptyList(),
+    val spokenLength: Int = 0,
+    val durationMs: Long = 0,
+)
 
 class SystemTtsSpeechGenerator(context: Context) {
     private data class Capture(
         val rawFile: File,
         val destination: File,
-        val result: CompletableDeferred<File>,
+        val result: CompletableDeferred<Long>,
         var sampleRate: Int = 0,
         var channelCount: Int = 0,
         var encoding: Int = 0,
@@ -199,12 +207,12 @@ class SystemTtsSpeechGenerator(context: Context) {
     suspend fun synthesize(text: String, identity: String, strictOffline: Boolean): List<GeneratedSpeechFile> = synthesisMutex.withLock {
         awaitReady()
         strictOfflineVoiceFailure(voiceNetworkRequirement(), strictOffline)?.let { throw IllegalStateException(it) }
-        val queuedFiles = playbackStore.queue().mapNotNull { item ->
-            Uri.parse(item.uri).takeIf { it.scheme == "file" }?.path
+        val queuedKeys = playbackStore.queue().mapNotNull { item ->
+            Uri.parse(item.uri).takeIf { it.scheme == "file" }?.lastPathSegment?.removeSuffix(".wav")
         }.toSet()
         withContext(Dispatchers.IO) {
             currentCoroutineContext().ensureActive()
-            evictSpeechCache(queuedFiles)
+            evictSpeechCache(queuedKeys)
             val voiceIdentity = listOf(engine.defaultEngine.orEmpty(), engine.voice?.name.orEmpty(), engine.voice?.locale?.toLanguageTag().orEmpty())
                 .joinToString("|")
             splitSpeechText(text, (TextToSpeech.getMaxSpeechInputLength() - 128).coerceAtLeast(256)).mapIndexed { index, chunk ->
@@ -213,15 +221,17 @@ class SystemTtsSpeechGenerator(context: Context) {
                 val destination = File(outputDirectory, "$digest.wav")
                 if (destination.isFile && destination.length() > 44L) {
                     destination.setLastModified(System.currentTimeMillis())
-                    GeneratedSpeechFile(destination, index, chunk.sourceOffset, chunk.sentenceIds)
+                    // For cached files, estimate duration from file size
+                    val estimatedDurationMs = estimateDurationFromFile(destination)
+                    GeneratedSpeechFile(destination, index, chunk.sourceOffset, chunk.sentenceIds, chunk.sentenceStartOffsets, chunk.text.length, estimatedDurationMs)
                 } else {
                     // Check free space before synthesis
                     if (!hasFreeSpace()) {
                         throw IllegalStateException("Insufficient storage space for speech synthesis. Free up space and try again.")
                     }
-                    synthesizeChunk(chunk.text, destination)
+                    val durationMs = synthesizeChunk(chunk.text, destination)
                     destination.setLastModified(System.currentTimeMillis())
-                    GeneratedSpeechFile(destination, index, chunk.sourceOffset, chunk.sentenceIds)
+                    GeneratedSpeechFile(destination, index, chunk.sourceOffset, chunk.sentenceIds, chunk.sentenceStartOffsets, chunk.text.length, durationMs)
                 }
             }
         }
@@ -242,6 +252,16 @@ class SystemTtsSpeechGenerator(context: Context) {
         }
     }
 
+    private fun estimateDurationFromFile(file: File): Long {
+        // WAV header is 44 bytes, rest is PCM data
+        val dataSize = file.length() - 44
+        if (dataSize <= 0) return 0
+        // Assume standard 22050 Hz, 1 channel, 16-bit (typical for Android TTS)
+        // This is a fallback estimate; actual duration is stored when freshly synthesized
+        val assumedByteRate = 22050 * 1 * 16 / 8 // 44100 bytes/sec
+        return (dataSize * 1000L) / assumedByteRate
+    }
+
     fun shutdown() {
         captures.values.forEach { capture ->
             synchronized(capture) { runCatching { capture.output?.close() } }
@@ -255,7 +275,7 @@ class SystemTtsSpeechGenerator(context: Context) {
 
     private suspend fun awaitReady() = withTimeout(15_000L) { ready.await() }
 
-    private suspend fun synthesizeChunk(text: String, destination: File) {
+    private suspend fun synthesizeChunk(text: String, destination: File): Long {
         val utteranceId = UUID.randomUUID().toString()
         val raw = File.createTempFile("speech-", ".pcm", outputDirectory)
         val capture = Capture(raw, destination, CompletableDeferred())
@@ -264,7 +284,7 @@ class SystemTtsSpeechGenerator(context: Context) {
         try {
             val result = engine.synthesizeToFile(text, Bundle(), engineOutput, utteranceId)
             check(result == TextToSpeech.SUCCESS) { "The system speech engine rejected a speech segment." }
-            withTimeout(120_000L) { capture.result.await() }
+            return withTimeout(120_000L) { capture.result.await() }
         } catch (error: Exception) {
             runCatching { engine.stop() }
             captures.remove(utteranceId)
@@ -285,14 +305,15 @@ class SystemTtsSpeechGenerator(context: Context) {
         }
     }
 
-    private fun evictSpeechCache(queuedPaths: Set<String>) {
+    private fun evictSpeechCache(protectedKeys: Set<String>) {
         val now = System.currentTimeMillis()
         val waveFiles = outputDirectory.listFiles { file -> file.isFile && file.extension == "wav" }.orEmpty()
         var totalBytes = waveFiles.sumOf(File::length)
         waveFiles.sortedBy(File::lastModified).forEach { file ->
-            val queued = file.absolutePath in queuedPaths
+            val cacheKey = file.nameWithoutExtension
+            val protected = cacheKey in protectedKeys
             val expired = now - file.lastModified() > SPEECH_CACHE_MAX_AGE_MILLIS
-            if (!queued && (expired || totalBytes > SPEECH_CACHE_MAX_BYTES)) {
+            if (!protected && (expired || totalBytes > SPEECH_CACHE_MAX_BYTES)) {
                 val size = file.length()
                 if (file.delete()) totalBytes -= size
             }
@@ -303,7 +324,7 @@ class SystemTtsSpeechGenerator(context: Context) {
         }.orEmpty().forEach(File::delete)
     }
 
-    private fun writeWave(capture: Capture): File {
+    private fun writeWave(capture: Capture): Long {
         val destination = capture.destination
         require(capture.sampleRate in 8_000..192_000) { "The speech engine returned an unsupported sample rate." }
         require(capture.channelCount in 1..2) { "The speech engine returned an unsupported channel count." }
@@ -320,6 +341,11 @@ class SystemTtsSpeechGenerator(context: Context) {
         require(sourceSize > 0L && sourceSize % (sourceBytesPerSample * capture.channelCount) == 0L) { "The system speech engine returned incomplete audio." }
         val convertedSize = if (bits == 8) sourceSize else sourceSize / sourceBytesPerSample * 2L
         require(convertedSize <= Int.MAX_VALUE - 44L) { "This speech segment is too large to cache safely." }
+        
+        // Compute duration in milliseconds
+        val byteRate = capture.sampleRate * capture.channelCount * bits / 8
+        val durationMs = (convertedSize * 1000L) / byteRate
+        
         val partial = File(destination.parentFile, "${destination.name}.part")
         try {
             BufferedOutputStream(FileOutputStream(partial)).use { output ->
@@ -352,7 +378,7 @@ class SystemTtsSpeechGenerator(context: Context) {
             }
             if (destination.exists()) destination.delete()
             check(partial.renameTo(destination)) { "Murmur couldn't finalize the generated speech file." }
-            return destination
+            return durationMs
         } finally {
             capture.rawFile.delete()
             partial.delete()
@@ -393,16 +419,19 @@ class SystemTtsSpeechGenerator(context: Context) {
         var currentStart = -1
         var current = StringBuilder()
         var currentSentenceIds = mutableListOf<String>()
+        var currentSentenceStartOffsets = mutableListOf<Int>()
         val sentenceIdGenerator = mutableMapOf<Int, String>()
         var sentenceCounter = 0
         fun flush() {
             val speech = current.toString().trim()
             if (speech.isNotEmpty()) {
                 val ids = currentSentenceIds.toList()
-                output += SpeechChunk(currentStart.coerceAtLeast(0), speech, ids)
+                val offsets = currentSentenceStartOffsets.toList()
+                output += SpeechChunk(currentStart.coerceAtLeast(0), speech, ids, offsets)
             }
             current = StringBuilder()
             currentSentenceIds.clear()
+            currentSentenceStartOffsets.clear()
             currentStart = -1
         }
         sentenceMatches.forEach { match ->
@@ -426,7 +455,12 @@ class SystemTtsSpeechGenerator(context: Context) {
                     val leadingChunkWhitespace = rawChunk.indexOfFirst { !it.isWhitespace() }.coerceAtLeast(0)
                     val chunkText = rawChunk.trim()
                     if (chunkText.isNotEmpty()) {
-                        output += SpeechChunk(sentenceStart + offset + leadingChunkWhitespace, chunkText, listOf(sentenceId))
+                        output += SpeechChunk(
+                            sentenceStart + offset + leadingChunkWhitespace,
+                            chunkText,
+                            listOf(sentenceId),
+                            listOf(sentenceStart + offset + leadingChunkWhitespace),
+                        )
                     }
                     offset = end
                     while (offset < sentence.length && sentence[offset].isWhitespace()) offset++
@@ -438,13 +472,19 @@ class SystemTtsSpeechGenerator(context: Context) {
                 if (current.isNotEmpty()) current.append(' ')
                 current.append(sentence)
                 currentSentenceIds.add(sentenceId)
+                currentSentenceStartOffsets.add(sentenceStart)
             }
         }
         flush()
         return output
     }
 
-    private data class SpeechChunk(val sourceOffset: Int, val text: String, val sentenceIds: List<String>)
+    private data class SpeechChunk(
+        val sourceOffset: Int,
+        val text: String,
+        val sentenceIds: List<String>,
+        val sentenceStartOffsets: List<Int>,
+    )
 
     private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
         .digest(value.toByteArray(Charsets.UTF_8))

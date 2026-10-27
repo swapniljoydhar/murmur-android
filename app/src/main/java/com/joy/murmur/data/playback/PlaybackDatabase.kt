@@ -259,6 +259,21 @@ data class BatchWorkUnitEntity(
     val updatedAtMillis: Long,
 )
 
+@Entity(
+    tableName = "read_aloud_segment_map",
+    primaryKeys = ["documentId", "sourceOffset"],
+    indices = [Index("documentId")],
+)
+data class ReadAloudSegmentMapEntity(
+    val documentId: String,
+    val sourceOffset: Long,
+    val sentenceIdsJson: String,
+    val sentenceStartOffsetsJson: String,
+    val sourcePageStart: Long,
+    val sourcePageLength: Int,
+    val segmentDurationMs: Long,
+)
+
 enum class BatchJobStatus(val value: Int) {
     PENDING(0),
     RUNNING(1),
@@ -510,6 +525,22 @@ interface PlaybackDao {
     @Query("DELETE FROM batch_work_units WHERE jobId = :jobId")
     suspend fun deleteBatchWorkUnits(jobId: String)
 
+    // Read Aloud segment map methods
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertSegmentMap(entity: ReadAloudSegmentMapEntity)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertSegmentMaps(entities: List<ReadAloudSegmentMapEntity>)
+
+    @Query("SELECT * FROM read_aloud_segment_map WHERE documentId = :documentId AND sourceOffset = :sourceOffset")
+    suspend fun getSegmentMap(documentId: String, sourceOffset: Long): ReadAloudSegmentMapEntity?
+
+    @Query("SELECT * FROM read_aloud_segment_map WHERE documentId = :documentId ORDER BY sourceOffset")
+    suspend fun getAllSegmentMapsForDocument(documentId: String): List<ReadAloudSegmentMapEntity>
+
+    @Query("DELETE FROM read_aloud_segment_map WHERE documentId = :documentId")
+    suspend fun deleteSegmentMapsForDocument(documentId: String)
+
     // Processor settings
     @Query("SELECT * FROM processor_settings WHERE id = 0")
     suspend fun getProcessorSettings(): ProcessorSettingsEntity?
@@ -519,8 +550,8 @@ interface PlaybackDao {
 }
 
 @Database(
-    entities = [QueueItemEntity::class, PlaybackStateEntity::class, ListeningProgressEntity::class, AudiobookEntity::class, AudiobookBookmarkEntity::class, AudiobookChapterEntity::class, MusicTrackEntity::class, MusicCatalogStateEntity::class, MusicPlaylistEntity::class, MusicPlaylistTrackEntity::class, ReaderDocumentEntity::class, ReaderBookmarkEntity::class, DocumentStructureEntity::class, BatchJobEntity::class, BatchWorkUnitEntity::class, ProcessorSettingsEntity::class],
-    version = 15,
+    entities = [QueueItemEntity::class, PlaybackStateEntity::class, ListeningProgressEntity::class, AudiobookEntity::class, AudiobookBookmarkEntity::class, AudiobookChapterEntity::class, MusicTrackEntity::class, MusicCatalogStateEntity::class, MusicPlaylistEntity::class, MusicPlaylistTrackEntity::class, ReaderDocumentEntity::class, ReaderBookmarkEntity::class, DocumentStructureEntity::class, BatchJobEntity::class, BatchWorkUnitEntity::class, ReadAloudSegmentMapEntity::class, ProcessorSettingsEntity::class],
+    version = 16,
     exportSchema = true,
 )
 abstract class PlaybackDatabase : RoomDatabase() {
@@ -535,7 +566,7 @@ abstract class PlaybackDatabase : RoomDatabase() {
                 context.applicationContext,
                 PlaybackDatabase::class.java,
                 "murmur.db",
-            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15).build().also { instance = it }
+            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16).build().also { instance = it }
         }
 
         private val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -631,6 +662,24 @@ abstract class PlaybackDatabase : RoomDatabase() {
         internal val MIGRATION_14_15 = object : Migration(14, 15) {
             override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE audiobook_chapters ADD COLUMN source TEXT NOT NULL DEFAULT 'UNKNOWN'")
+            }
+        }
+
+        internal val MIGRATION_15_16 = object : Migration(15, 16) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS read_aloud_segment_map (
+                        documentId TEXT NOT NULL,
+                        sourceOffset INTEGER NOT NULL,
+                        sentenceIdsJson TEXT NOT NULL,
+                        sentenceStartOffsetsJson TEXT NOT NULL,
+                        sourcePageStart INTEGER NOT NULL,
+                        sourcePageLength INTEGER NOT NULL,
+                        segmentDurationMs INTEGER NOT NULL,
+                        PRIMARY KEY(documentId, sourceOffset)
+                    )
+                """)
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_read_aloud_segment_map_documentId ON read_aloud_segment_map(documentId)")
             }
         }
     }

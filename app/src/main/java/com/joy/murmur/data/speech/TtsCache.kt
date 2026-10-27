@@ -117,13 +117,13 @@ class TtsCache(
             .forEach { pinned.remove(it.key) }
     }
 
-    internal fun evictIfNeeded() {
+    internal fun evictIfNeeded(protectedKeys: Set<String> = emptySet()) {
         val now = System.currentTimeMillis()
         var currentTotal = totalSize.get()
         
         // First pass: evict expired entries
         val expiredCandidates = metadata.entries
-            .filter { pinned[it.key] == null }
+            .filter { pinned[it.key] == null && it.key !in protectedKeys }
             .filter { now - it.value.lastAccessed > maxAgeMillis }
             .sortedBy { it.value.lastAccessed }
             .map { it.key }
@@ -142,7 +142,7 @@ class TtsCache(
         currentTotal = totalSize.get()
         if (currentTotal > maxSizeBytes) {
             val lruCandidates = metadata.entries
-                .filter { pinned[it.key] == null }
+                .filter { pinned[it.key] == null && it.key !in protectedKeys }
                 .sortedBy { it.value.lastAccessed }
                 .map { it.key }
                 .toList()

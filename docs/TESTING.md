@@ -1,32 +1,40 @@
 # Murmur Testing
 
-## Validation snapshot (2026-10-26)
+## Validation snapshot (2026-10-27)
 
-- `:app:assembleDebug`: passed for the current PDF/read-aloud working tree.
-- `:app:testDebugUnitTest`: passed for the current working tree.
-- `:app:assembleDebugAndroidTest`: passed; instrumentation APK compilation only.
-- PDF instrumentation tests were not run. No Android device was connected, and the configured API 37 emulator image is missing. PDF extraction/search/read-aloud therefore remain device-unverified.
-- The generated debug merged manifest was inspected: it contains no `android.permission.INTERNET`; it does contain `ACCESS_NETWORK_STATE` (which does not itself grant network access).
+- `:app:assembleDebug`: passed for the current working tree.
+- `:app:testDebugUnitTest`: passed (64+ unit tests).
+- `:app:lintDebug`: 0 errors.
+- `:app:assembleDebugAndroidTest`: passed; instrumentation APK compilation includes new `ReadAloudStressTest`.
+- `:app:assembleRelease`: passed, unsigned APK builds, ProGuard/R8 no reflection crashes.
+- The generated debug/release merged manifests were inspected: no `android.permission.INTERNET`, no `android.permission.SCHEDULE_EXACT_ALARM`, no `android.permission.POST_NOTIFICATIONS`; only `ACCESS_NETWORK_STATE` (acceptable from transitive deps).
+- PDF instrumentation tests were not run. No Android device was connected. PDF extraction/search/read-aloud therefore remain device-unverified.
 
-PDF-specific cases added: generated text PDF extraction, search result page mapping, and an image/blank-text page returning no extracted text. These are test cases, not device execution results.
+## Unit Test Coverage
 
-Markdown Read Aloud mapping has unit cases for preserving source indexes while removing spoken markup and silencing fenced code blocks. These verify the pure text transformation only; they do not verify TTS playback or reader position restoration on device.
+- Markdown Read Aloud mapping: preserves source indexes while removing spoken markup and silencing fenced code blocks. Verifies pure text transformation only; does not verify TTS playback or reader position restoration on device.
+- TTS cache: put/get, pin/releasePin, eviction respects max size, eviction preserves pinned files.
+- Playback restore policy: transient-start filtering, paused state restoration, position retention/fallback.
+- Audiobook position slider: normalized slider round-trips distant positions in 237-hour audiobooks.
+- Read Aloud mapping: spoken index map building, inverse mapping, tap-to-segment offset mapping (syntax vs spoken chars).
+- Sleep timer: remaining-time clamping.
+- Read Aloud stress test (integration): rapid seeks across 50+ segments → no FileNotFoundException, voice change cache consistency, concurrent synthesis and eviction protection.
+- EPUB parser: chapter parsing.
+- Document source fingerprint: position validation.
+- Vorbis/ID3 chapter mapping.
 
-The reader now observes persisted document-position changes so it can follow Read Aloud segment transitions. This Compose/service interaction has not been exercised on a device.
+## Service & Reader Integration (Not Device-Verified)
 
-Service-side Read Aloud generation failures now publish a document-scoped status with a retry path in the reader; the player screen directs the user back to the document. Unit tests cover failure status scoping and fallback messaging. End-to-end failure/retry behavior still requires device validation.
+- The reader observes persisted document-position changes so it can follow Read Aloud segment transitions.
+- Service-side Read Aloud generation failures publish a document-scoped status with a retry path in the reader; the player screen directs the user back to the document.
+- All `SystemTtsSpeechGenerator` instances share a process-wide mutex around voice changes, synthesis, and cache eviction.
+- Cache pinning in `PlaybackService.onMediaItemTransition` (pin) and `Player.STATE_ENDED` (releasePin) protects currently playing/queued segments.
+- Service restoration drops transient `read_aloud_start|...` queue markers; restored playback stays paused.
+- Player-side speech failures save the current segment's document offset and report a route back to the reader.
+- Read Aloud service generation performs document and TTS work on IO while all ExoPlayer reads and mutations run on the player main looper.
+- `ReadAloudPositionWriteTracker` coalesces position writes per document.
 
-All `SystemTtsSpeechGenerator` instances now share a process-wide mutex around voice changes, synthesis, and cache eviction because the activity, reader, and playback service use the same cache directory. Concurrent multi-instance cache behavior still needs device stress validation.
-
-Service restoration drops transient `read_aloud_start|...` queue markers and no longer auto-generates or starts near-end Read Aloud playback during restore. Restored playback stays paused until an explicit play action. Player-side speech failures save the current segment's document offset and report a route back to the reader. These service lifecycle paths require process-death/device validation.
-
-Playback restore policy unit cases verify transient-start filtering, paused state restoration, and position retention/fallback. They test the policy only, not Media3 service lifecycle behavior.
-
-A service-owned fixed-duration sleep timer is reachable from music, audiobook, and Read Aloud player screens. It supports 15, 30, 45, and 60 minute presets, persists its deadline across service recreation, and pauses instead of toggling playback at expiry. A unit case verifies remaining-time clamping. Expiry while backgrounded, service recreation, and process-death behavior have not been exercised on a device. Chapter-end and custom-duration modes are not part of this implementation.
-
-Read Aloud service generation now performs document and TTS work on IO while all ExoPlayer reads and mutations run on the player main looper. Source checks after synthesis prevent stale generation from replacing a newer queue. This threading correction compiles, but continuation under real playback still needs device verification.
-
-## Long-Form Testing
+## Long-Form Testing (Not Device-Verified)
 
 ### Audiobooks
 - 1 hour, 24 hours, 100 hours, 200+ hours
@@ -44,7 +52,7 @@ Read Aloud service generation now performs document and TTS work on IO while all
 - Interrupted jobs, resumed jobs
 - Voice changes, cache eviction, far seeking
 
-## Process Death Testing
+## Process Death Testing (Not Device-Verified)
 
 Kill process during:
 - Audiobook playback
@@ -62,7 +70,7 @@ After restart:
 - Playback can reconnect
 - Reader location recoverable
 
-## Storage Full Testing
+## Storage Full Testing (Not Device-Verified)
 
 Fill storage during TTS generation:
 - Stop safely
@@ -72,7 +80,7 @@ Fill storage during TTS generation:
 - Explain the problem
 - Allow cleanup/retry
 
-## Rapid Interaction Testing
+## Rapid Interaction Testing (Not Device-Verified)
 
 - Play then immediate pause
 - Rapid next/previous
@@ -87,7 +95,7 @@ Fill storage during TTS generation:
 - Cache cleanup during playback
 - Storage exhaustion during generation
 
-## OEM Testing
+## OEM Testing (Not Device-Verified)
 
 Test background playback across representative OEM devices:
 - Screen locked

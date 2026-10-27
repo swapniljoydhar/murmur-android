@@ -27,8 +27,11 @@ On providers that expose size and last-modified metadata, the source fingerprint
 - EPUB table of contents with navigation to readable spine-chapter starts; in-chapter fragment links are not mapped
 - Search in supported text formats; PDF search requires API 35+ and extractable page text
 - Read Aloud from the current text page with generated speech offsets mapped back to the source document; Markdown syntax cleanup preserves source indexes
+- **Sentence highlighting during Read Aloud**: Approximation via `segmentDurationMs / sentenceCount` per sentence; segment-level fallback when no sentence map.
+- **Tap-to-Read**: Tap any sentence in plain text reader → speech seeks to that sentence (±1 sentence tolerance). Markdown syntax in rendered text vs. stripped speech text is correctly mapped.
+- **Return to Text**: Stop Read Aloud → reader scrolls to last spoken sentence position (via `savePosition` + observed position change).
 
-Read Aloud position following is segment-level. Sentence highlighting and continuous in-page synchronization are not implemented.
+Read Aloud position following is segment-level. Continuous in-page synchronization to audio time is not implemented (system TTS provides no word/sentence timing).
 
 Reader text-size and Strict Offline Speech preferences are persisted. Reader themes, reading rulers, auto-scroll, highlights, and notes are not implemented.
 

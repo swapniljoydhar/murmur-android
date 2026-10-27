@@ -114,21 +114,66 @@ import com.joy.murmur.playback.SleepTimer
 import com.joy.murmur.playback.SelectedAudio
 import com.joy.murmur.playback.readAloudMediaId
 import com.joy.murmur.playback.markdownForSpeech
+import com.joy.murmur.playback.ReadAloudUtils.buildSpokenIndexMap
+import com.joy.murmur.playback.ReadAloudUtils.mapTapOffsetToSegment
+import com.joy.murmur.playback.ReadAloudUtils.buildInverseSpokenIndexMap
 import com.joy.murmur.playback.toStableMediaId
 import com.joy.murmur.playback.BackgroundPlaybackHealth
 import com.joy.murmur.playback.OemDiagnosticState
 import com.joy.murmur.playback.OemCompatibility
+import com.joy.murmur.data.playback.PlaybackDatabase
+import com.joy.murmur.data.playback.ReadAloudSegmentMapEntity
+import com.joy.murmur.data.playback.ReaderDocumentStore
 import com.joy.murmur.ui.theme.MurmurTheme
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.debounce
+import kotlinx.serialization.json.Json
 
 private fun createTtsSettingsIntent(): Intent {
     val intent = Intent("com.android.settings.TTS_SETTINGS")
     intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
     return intent
+}
+
+private fun buildHighlightedText(
+    text: String,
+    sentenceIdx: Int,
+    segmentMap: ReadAloudSegmentMapEntity,
+    inverseSpokenIndexMap: IntArray?,
+    highlightColor: androidx.compose.ui.graphics.Color,
+): AnnotatedString {
+    val sentenceOffsets = Json.decodeFromString<List<Long>>(segmentMap.sentenceStartOffsetsJson)
+    if (sentenceIdx >= sentenceOffsets.size - 1) return AnnotatedString(text) // -1 because last entry is end offset
+    val spokenStart = sentenceOffsets[sentenceIdx].toInt()
+    val spokenEnd = sentenceOffsets[sentenceIdx + 1].toInt()
+    
+    // Map spoken offsets to rendered (original) text offsets using inverse map
+    val (renderedStart, renderedEnd) = if (inverseSpokenIndexMap != null && spokenStart < inverseSpokenIndexMap.size) {
+        val start = inverseSpokenIndexMap[spokenStart].coerceIn(0, text.length)
+        val end = if (spokenEnd < inverseSpokenIndexMap.size) {
+            inverseSpokenIndexMap[spokenEnd].coerceIn(start, text.length)
+        } else {
+            text.length
+        }
+        start to end
+    } else {
+        // Fallback: use spoken offsets directly (for non-markdown or if inverse map unavailable)
+        spokenStart.coerceIn(0, text.length) to spokenEnd.coerceIn(0, text.length)
+    }
+    
+    val builder = AnnotatedString.Builder(text)
+    if (renderedStart < renderedEnd) {
+        builder.addStyle(
+            SpanStyle(background = highlightColor),
+            renderedStart,
+            renderedEnd,
+        )
+    }
+    return builder.toAnnotatedString()
 }
 
 private enum class Destination(val route: String, val title: String, val description: String) {
@@ -970,6 +1015,62 @@ private fun ReaderScreen(
     var loadingEpubContents by remember(documentId) { mutableStateOf(false) }
     var epubContentsError by remember(documentId) { mutableStateOf<String?>(null) }
 
+    // Read Aloud highlighting state
+    val playback by (playbackController?.snapshot ?: remember { kotlinx.coroutines.flow.MutableStateFlow(PlaybackSnapshot()) }).collectAsState()
+    var currentSegmentMap by remember { mutableStateOf<ReadAloudSegmentMapEntity?>(null) }
+    var spokenIndexMap by remember { mutableStateOf<IntArray?>(null) }
+    var inverseSpokenIndexMap by remember { mutableStateOf<IntArray?>(null) }
+    var currentSentenceIdx by remember { mutableStateOf<Int?>(null) }
+
+    // Query segment map when Read Aloud is playing for this document
+    LaunchedEffect(playback, documentId) {
+        val current = playback.current
+        if (current != null && current.contentType == PlaybackContentType.READ_ALOUD) {
+            val segment = parseReadAloudMediaId(current.id)
+            if (segment?.documentId == documentId) {
+                scope.launch(Dispatchers.IO) {
+                    val database = PlaybackDatabase.getInstance(context)
+                    val dao = database.playbackDao()
+                    val map = dao.getSegmentMap(documentId, segment.sourceOffset)
+                    currentSegmentMap = map
+                    if (map != null && page.isNotEmpty()) {
+                        val spokenMap = buildSpokenIndexMap(page)
+                        spokenIndexMap = spokenMap
+                        inverseSpokenIndexMap = buildInverseSpokenIndexMap(spokenMap)
+                    }
+                }
+            } else {
+                currentSegmentMap = null
+                spokenIndexMap = null
+                inverseSpokenIndexMap = null
+            }
+        } else {
+            currentSegmentMap = null
+            spokenIndexMap = null
+            inverseSpokenIndexMap = null
+        }
+    }
+
+    // Update current sentence index based on playback position
+    LaunchedEffect(playback, currentSegmentMap) {
+        val current = playback.current
+        val map = currentSegmentMap
+        if (current != null && current.contentType == PlaybackContentType.READ_ALOUD && map != null) {
+            val segment = parseReadAloudMediaId(current.id)
+            if (segment?.documentId == documentId) {
+                val segmentDuration = map.segmentDurationMs.coerceAtLeast(1)
+                val sentenceCount = Json.decodeFromString<List<String>>(map.sentenceIdsJson).size
+                if (sentenceCount > 0) {
+                    val sentenceDuration = segmentDuration / sentenceCount.toLong()
+                    val idx = (playback.positionMs / sentenceDuration).coerceIn(0L, sentenceCount - 1L).toInt()
+                    currentSentenceIdx = idx
+                }
+            }
+        } else {
+            currentSentenceIdx = null
+        }
+    }
+
     fun startReadAloud(continuous: Boolean) {
         val currentDocument = document ?: return
         val pageStart = position ?: 0L
@@ -1006,7 +1107,7 @@ private fun ReaderScreen(
                     )
                 }
                 if (items.isEmpty()) speechError = "There is no readable text on this page."
-                else if ((position ?: 0L) != pageStart || page != sourcePage) {
+                else if (page != sourcePage) {
                     speechError = "The reading position changed while speech was being prepared. Start Read Aloud again."
                 } else if (playbackController != null) {
                     val currentPlayback = playbackController.snapshot.value
@@ -1292,6 +1393,12 @@ private fun ReaderScreen(
             Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
                 if (document?.mimeType == "text/markdown") {
                     val type = MaterialTheme.typography
+                    val highlightedPage = if (currentSentenceIdx != null && currentSegmentMap != null) {
+                        // Build AnnotatedString with highlighted sentence for markdown
+                        // For simplicity, we'll just render the markdown without sentence highlighting for now
+                        // since markdown rendering is block-based
+                        page
+                    } else page
                     MaterialTheme(
                         typography = type.copy(
                             bodyLarge = type.bodyLarge.copy(fontSize = type.bodyLarge.fontSize * readerTextScale),
@@ -1300,21 +1407,39 @@ private fun ReaderScreen(
                             titleMedium = type.titleMedium.copy(fontSize = type.titleMedium.fontSize * readerTextScale),
                             titleSmall = type.titleSmall.copy(fontSize = type.titleSmall.fontSize * readerTextScale),
                         ),
-                    ) { MarkdownReaderContent(page) }
+                    ) { MarkdownReaderContent(highlightedPage) }
                 } else if (document?.mimeType == "text/plain") {
                     val pageStart = position ?: document.positionChars
                     var textLayout by remember(page) { mutableStateOf<TextLayoutResult?>(null) }
+                    val highlightedText: AnnotatedString = if (currentSentenceIdx != null && currentSegmentMap != null) {
+                        buildHighlightedText(page, currentSentenceIdx!!, currentSegmentMap!!, inverseSpokenIndexMap, MaterialTheme.colorScheme.primaryContainer)
+                    } else AnnotatedString(page)
                     Text(
                         "Tap text to set a reading position, then choose Read from here.",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Text(
-                        text = page,
+                        text = highlightedText,
                         modifier = Modifier
-                            .pointerInput(page, pageStart) {
+                            .pointerInput(page, pageStart, currentSentenceIdx, currentSegmentMap, playbackController, playback) {
                                 detectTapGestures { tapOffset ->
                                     val offset = textLayout?.getOffsetForPosition(tapOffset) ?: return@detectTapGestures
+                                    // Tap-to-Read: if Read Aloud is active, seek to tapped sentence
+                                    if (currentSegmentMap != null && spokenIndexMap != null) {
+                                        val segmentSourceOffset = mapTapOffsetToSegment(offset, spokenIndexMap!!, currentSegmentMap!!)
+                                        if (segmentSourceOffset != null) {
+                                            // Find the matching segment in the current queue
+                                            val targetIndex = playback.items.indexOfFirst { item ->
+                                                parseReadAloudMediaId(item.id)?.sourceOffset == segmentSourceOffset
+                                            }
+                                            if (targetIndex >= 0) {
+                                                playbackController?.playItem(targetIndex)
+                                                return@detectTapGestures
+                                            }
+                                        }
+                                    }
+                                    // Regular tap: set reading position
                                     previousPages.clear()
                                     position = pageStart + offset.coerceIn(0, page.lastIndex)
                                 }
@@ -1920,6 +2045,8 @@ private fun ReadAloudPlayerScreen(snapshot: PlaybackSnapshot, controller: Playba
         ?: current.id.takeIf { it.startsWith("read_aloud_start|") }
             ?.split('|')?.getOrNull(1)?.let(Uri::decode)
     val currentFailure = failure?.takeIf { it.documentId == currentDocumentId }
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 24.dp, vertical = 28.dp),
         verticalArrangement = Arrangement.spacedBy(18.dp),
@@ -1945,6 +2072,22 @@ private fun ReadAloudPlayerScreen(snapshot: PlaybackSnapshot, controller: Playba
         }
         TextButton(onClick = onReturnToDocument) { Text("Return to document") }
         TextButton(onClick = {
+            // Return to Text: save last spoken position before stopping
+            if (currentDocumentId != null) {
+                scope.launch(Dispatchers.IO) {
+                    val database = PlaybackDatabase.getInstance(context)
+                    val dao = database.playbackDao()
+                    val maps = dao.getAllSegmentMapsForDocument(currentDocumentId)
+                    if (maps.isNotEmpty()) {
+                        val lastMap = maps.maxByOrNull { it.sourceOffset } ?: maps.last()
+                        val sentenceOffsets = Json.decodeFromString<List<Long>>(lastMap.sentenceStartOffsetsJson)
+                        val lastSentenceOffset = sentenceOffsets.lastOrNull() ?: 0L
+                        val targetChar = lastMap.sourcePageStart + lastSentenceOffset
+                        val documentsStore = ReaderDocumentStore(database)
+                        documentsStore.savePosition(currentDocumentId, targetChar)
+                    }
+                }
+            }
             controller?.clearQueue()
             onReturnToDocument()
         }) { Text("Stop reading aloud") }
