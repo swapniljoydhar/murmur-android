@@ -24,7 +24,6 @@ All direct and transitive dependencies use permissive licenses (Apache-2.0, MIT,
 | androidx.media3:media3-exoplayer | 1.11.1 | Apache-2.0 | Maven Central | |
 | androidx.media3:media3-session | 1.11.1 | Apache-2.0 | Maven Central | |
 | androidx.media3:media3-inspector | 1.11.1 | Apache-2.0 | Maven Central | |
-| androidx.glance:glance-appwidget | 1.2.0 | Apache-2.0 | Maven Central | |
 | junit:junit | 4.13.2 | EPL-2.0 | Maven Central | Test only |
 | androidx.test:core-ktx | 1.7.0 | Apache-2.0 | Maven Central | Test only |
 | androidx.test:runner | 1.7.0 | Apache-2.0 | Maven Central | Test only |
@@ -33,8 +32,6 @@ All direct and transitive dependencies use permissive licenses (Apache-2.0, MIT,
 | org.jetbrains.kotlinx:kotlinx-serialization-json | 1.8.0 | Apache-2.0 | Maven Central | |
 | androidx.documentfile:documentfile | 1.1.0 | Apache-2.0 | Maven Central | |
 | org.jetbrains.kotlinx:kotlinx-coroutines-test | 1.8.0 | Apache-2.0 | Maven Central | Test only |
-| androidx.appcompat:appcompat | 1.6.1 | Apache-2.0 | Maven Central | |
-| androidx.cardview:cardview | 1.0.0 | Apache-2.0 | Maven Central | |
 
 ## Kotlin Standard Library & Compiler
 

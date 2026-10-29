@@ -39,7 +39,12 @@ The separate `TtsScheduler` and `BatchTtsManager` are not wired into the app. Ne
 
 - **Jetpack Compose**: Modern declarative UI
 - **Material 3**: Design system
-- **Glance**: Home screen widgets
+
+There is no home-screen widget. An earlier `AppWidgetProvider` stub was removed because it refreshed its
+`RemoteViews` with `notifyAppWidgetViewDataChanged` (which only affects collection widgets, so it never
+updated) and its buttons called `startService` from a broadcast receiver, which is not allowed once the app
+is in the background. System media controls (notification, lock screen, Bluetooth/headset) are the
+supported playback surface.
 
 ## Incoming intents
 

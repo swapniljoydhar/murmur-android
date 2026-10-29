@@ -1,4 +1,4 @@
-﻿package com.joy.murmur.playback
+package com.joy.murmur.playback
 
 import android.content.Intent
 import android.os.Process
@@ -28,8 +28,6 @@ import com.joy.murmur.data.speech.TtsCache
 import com.joy.murmur.data.settings.DataStoreSettingsRepository
 import com.joy.murmur.data.settings.settingsDataStore
 import com.joy.murmur.domain.documents.ReaderDocument
-import com.joy.murmur.widget.WidgetManager
-import com.joy.murmur.widget.WidgetActionReceiver
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -221,15 +219,6 @@ class PlaybackService : MediaSessionService() {
                 if (minutes in 1..SleepTimer.MAX_DURATION_MINUTES) sleepTimer.start(minutes)
             }
             ACTION_CANCEL_SLEEP_TIMER -> sleepTimer.cancel()
-        }
-        intent?.getStringExtra("widget_action")?.let { action ->
-            when (action) {
-                "play" -> if (!player.isPlaying) player.play()
-                "pause" -> if (player.isPlaying) player.pause()
-                "next" -> player.seekToNextMediaItem()
-                "previous" -> player.seekToPreviousMediaItem()
-            }
-            WidgetManager.updateAllWidgets(this)
         }
         return startResult
     }

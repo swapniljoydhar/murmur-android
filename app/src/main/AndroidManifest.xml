@@ -14,7 +14,7 @@
         android:protectionLevel="signature" />
     <application
         android:allowBackup="false"
-        android:label="Murmur"
+        android:label="@string/app_name"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Material.Light.NoActionBar"
         android:dataExtractionRules="@xml/data_extraction_rules"
@@ -145,29 +145,5 @@
                 <action android:name="androidx.media3.session.MediaSessionService" />
             </intent-filter>
         </service>
-        <!-- Widget receiver -->
-        <receiver
-            android:name=".widget.WidgetActionReceiver"
-            android:exported="false" />
-        <!-- Glance widget provider -->
-        <receiver
-            android:name=".widget.NowPlayingWidget"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
-            </intent-filter>
-            <meta-data
-                android:name="android.appwidget.provider"
-                android:resource="@xml/murmur_app_widget_info" />
-        </receiver>
-        <!-- Widget configure activity -->
-        <activity
-            android:name=".widget.WidgetConfigureActivity"
-            android:exported="false"
-            android:theme="@android:style/Theme.Translucent.NoTitleBar">
-            <intent-filter>
-                <action android:name="android.appwidget.action.APPWIDGET_CONFIGURE" />
-            </intent-filter>
-        </activity>
     </application>
 </manifest>
