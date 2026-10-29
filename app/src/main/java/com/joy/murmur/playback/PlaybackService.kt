@@ -3,7 +3,6 @@ package com.joy.murmur.playback
 import android.content.Intent
 import android.os.Process
 import android.net.Uri
-import java.io.File
 import androidx.annotation.OptIn
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
@@ -22,9 +21,7 @@ import com.joy.murmur.data.playback.ReaderDocumentStore
 import com.joy.murmur.data.playback.ReadAloudSegmentMapEntity
 import com.joy.murmur.data.documents.RoomDocumentLibraryRepository
 import com.joy.murmur.data.speech.SystemTtsSpeechGenerator
-import com.joy.murmur.data.speech.SpeechSegmentResult
 import com.joy.murmur.data.speech.SynthesisIdentity
-import com.joy.murmur.data.speech.TtsCache
 import com.joy.murmur.data.settings.DataStoreSettingsRepository
 import com.joy.murmur.data.settings.settingsDataStore
 import com.joy.murmur.domain.documents.ReaderDocument
@@ -68,9 +65,6 @@ class PlaybackService : MediaSessionService() {
 
     // Single shared TTS generator instance
     private var ttsGenerator: SystemTtsSpeechGenerator? = null
-    
-    // TTS cache for pinning active segments
-    private val ttsCache = TtsCache(File(cacheDir, "read-aloud"))
 
     override fun onCreate() {
         super.onCreate()
@@ -120,10 +114,6 @@ class PlaybackService : MediaSessionService() {
                     cancelReadAloudWork()
                     return
                 }
-                // Pin the new Read Aloud segment in cache
-                if (segment.cacheKey.isNotBlank()) {
-                    ttsCache.pin(segment.cacheKey)
-                }
                 if (readAloudStartDocumentId != null && readAloudStartDocumentId != segment.documentId) {
                     readAloudStartJob?.cancel()
                     readAloudStartJob = null
@@ -146,10 +136,6 @@ class PlaybackService : MediaSessionService() {
                 if (playbackState != Player.STATE_ENDED) return
                 val mediaItem = player.currentMediaItem ?: return
                 val segment = parseReadAloudMediaId(mediaItem.mediaId) ?: return
-                // Release pin for ended segment
-                if (segment.cacheKey.isNotBlank()) {
-                    ttsCache.releasePin(segment.cacheKey)
-                }
                 if (!segment.continuous || player.currentMediaItemIndex != player.mediaItemCount - 1) return
                 if (continuationJob?.isActive == true) return
                 continuationDocumentId = segment.documentId
@@ -247,14 +233,6 @@ class PlaybackService : MediaSessionService() {
                 readAloudPositionToken?.let { token -> runCatching { persistReadAloudPosition(segment, token) } }
             }
             persistSnapshot(savedState)
-        }
-
-        // Release pins for all queued Read Aloud items
-        (0 until player.mediaItemCount).forEach { index ->
-            val item = player.getMediaItemAt(index)
-            parseReadAloudMediaId(item.mediaId)?.cacheKey?.let { cacheKey ->
-                if (cacheKey.isNotBlank()) ttsCache.releasePin(cacheKey)
-            }
         }
 
         // Release media session and player

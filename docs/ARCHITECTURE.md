@@ -30,10 +30,17 @@ MediaSessionService
 
 ## Speech Layer
 
-- **SystemTtsSpeechGenerator**: System TTS with voice selection, strict offline mode
-- **TtsCache**: Local WAV cache with SHA-256 keys
+- **SystemTtsSpeechGenerator**: System TTS with voice selection, strict offline mode. Writes WAV chunks to
+  `cache/read-aloud`, keyed by SHA-256 over synthesis identity, voice identity and chunk text, and evicts
+  by age and total size while sparing files still referenced by the playback queue.
+- **SynthesisIdentity**: the engine/voice/locale/format tuple that makes two synthesis results distinct.
 
-The separate `TtsScheduler` and `BatchTtsManager` are not wired into the app. Neural TTS is not implemented.
+There is no look-ahead scheduler and no batch generator. An earlier `TtsScheduler`/`BatchTtsManager`/
+`TtsQueueManager`/`TtsCache`/`SharedTtsCache` set was removed because nothing constructed it and it could
+not have worked (`extractSectionText()` returned an empty string, `seekTo()` closed its worker channel
+permanently, and it double-unlocked a mutex inside `withLock`). Read Aloud synthesizes one document page at a
+time in the reader and hands the generated files to the shared player, which synthesizes the next page when
+the queue reaches the end. Neural TTS is not implemented.
 
 ## UI Layer
 

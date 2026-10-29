@@ -19,5 +19,10 @@ When Strict Offline Speech is enabled, Murmur rejects a voice reported as networ
 ## Limits and deferred code
 
 - The optional neural generator is not implemented. Neural manifest/settings models do not provide a synthesis engine or model-management UI.
-- The separate `TtsScheduler` and `BatchTtsManager` classes are not constructed by the app. `TtsScheduler` currently has no source-text provider (`extractSectionText()` returns empty text) and closes its queue on seek; do not integrate it as-is.
+- There is no look-ahead scheduler and no batch generator. The former `TtsScheduler`, `BatchTtsManager`,
+  `TtsQueueManager`, `TtsCache` and `SharedTtsCache` classes were removed: nothing constructed them, and they
+  could not have worked (empty `extractSectionText()`, a worker channel closed permanently on seek, and a
+  mutex unlocked inside `withLock`). The live path is the reader plus `SystemTtsSpeechGenerator`, with the
+  service synthesizing the next page when the queue reaches the end. Bounded cache pinning does not exist;
+  eviction spares files still referenced by the playback queue.
 - Batch/full-book export, neural model downloads, cloud speech, and OCR are not part of the current implementation.
