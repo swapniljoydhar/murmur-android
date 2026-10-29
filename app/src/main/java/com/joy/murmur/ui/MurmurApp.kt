@@ -2,6 +2,7 @@ package com.joy.murmur.ui
 
 import android.Manifest
 import android.content.ContentResolver
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.content.pm.PackageManager
@@ -43,6 +44,8 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Tab
 import androidx.compose.material3.SecondaryTabRow
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.Switch
@@ -84,6 +87,7 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.joy.murmur.domain.settings.AppearanceMode
 import com.joy.murmur.domain.settings.SettingsRepository
+import com.joy.murmur.MurmurIntentRequest
 import com.joy.murmur.domain.music.MusicLibraryRepository
 import com.joy.murmur.domain.music.MusicPermissionRequiredException
 import com.joy.murmur.domain.music.MusicTrack
@@ -127,6 +131,7 @@ import com.joy.murmur.data.playback.ReaderDocumentStore
 import com.joy.murmur.ui.theme.MurmurTheme
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
@@ -176,6 +181,125 @@ private fun buildHighlightedText(
     return builder.toAnnotatedString()
 }
 
+/** Maps a parsed `murmur://` link onto a graph route. Unknown hosts are ignored rather than guessed. */
+private fun deepLinkRoute(request: MurmurIntentRequest.DeepLink): String? = when (request.host) {
+    "continue" -> Destination.Continue.route
+    "music" -> Destination.Music.route
+    "audiobooks" -> Destination.Audiobooks.route
+    "documents" -> Destination.Documents.route
+    "player" -> Destination.NowPlaying.route
+    "reader" -> request.pathSegments
+        .getOrNull(1)
+        ?.takeIf { it.isNotBlank() && it.length <= 256 }
+        ?.let { "reader/${Uri.encode(it)}" }
+    else -> null
+}
+
+private enum class SharedContentKind { DOCUMENT, AUDIO, UNSUPPORTED }
+
+private val sharedDocumentMimeTypes = setOf(
+    "text/plain", "text/markdown", "text/x-markdown", "text/html", "application/epub+zip", "application/pdf",
+)
+private val sharedDocumentExtensions = setOf("txt", "md", "markdown", "html", "htm", "epub", "pdf")
+private val sharedAudioExtensions = setOf("mp3", "m4a", "m4b", "aac", "flac", "ogg", "oga", "opus", "wav", "mp4", "amr")
+
+private data class SharedContentImport(
+    val documentIds: List<String>,
+    val documentsPartial: Boolean,
+    val audio: List<SelectedAudio>,
+    val skippedForAccess: Int,
+    val unsupported: Int,
+    val documentFailure: Boolean,
+)
+
+private fun classifySharedUri(resolver: ContentResolver, uri: Uri): SharedContentKind {
+    val mime = runCatching { resolver.getType(uri) }.getOrNull()?.lowercase().orEmpty()
+    val extension = uri.lastPathSegment?.substringAfterLast('.', "")?.lowercase().orEmpty()
+    return when {
+        mime in sharedDocumentMimeTypes || extension in sharedDocumentExtensions -> SharedContentKind.DOCUMENT
+        mime.startsWith("audio/") || extension in sharedAudioExtensions -> SharedContentKind.AUDIO
+        else -> SharedContentKind.UNSUPPORTED
+    }
+}
+
+/**
+ * Turns shared URIs into real library entries or a play queue. Runs off the main thread because it
+ * touches [ContentResolver] (type lookups, display names, persistable grants) for every URI.
+ */
+private suspend fun importSharedContent(
+    context: Context,
+    uris: List<Uri>,
+    documentLibraryRepository: DocumentLibraryRepository?,
+): SharedContentImport = withContext(Dispatchers.IO) {
+    val resolver = context.contentResolver
+    var skippedForAccess = 0
+    val retained = uris.filter { uri ->
+        val granted = retainReadAccess(resolver, uri)
+        if (!granted) skippedForAccess++
+        granted
+    }
+    var unsupported = 0
+    val documents = mutableListOf<Uri>()
+    val audio = mutableListOf<Uri>()
+    retained.forEach { uri ->
+        when (classifySharedUri(resolver, uri)) {
+            SharedContentKind.DOCUMENT -> documents += uri
+            SharedContentKind.AUDIO -> audio += uri
+            SharedContentKind.UNSUPPORTED -> unsupported++
+        }
+    }
+
+    val audioItems = audio.map { uri ->
+        SelectedAudio(
+            id = uri.toStableMediaId(),
+            uri = uri,
+            title = queryDisplayName(resolver, uri),
+            contentType = PlaybackContentType.MUSIC,
+        )
+    }
+
+    if (documents.isEmpty()) {
+        return@withContext SharedContentImport(
+            documentIds = emptyList(),
+            documentsPartial = false,
+            audio = audioItems,
+            skippedForAccess = skippedForAccess,
+            unsupported = unsupported,
+            documentFailure = false,
+        )
+    }
+    val repository = documentLibraryRepository
+        ?: return@withContext SharedContentImport(
+            documentIds = emptyList(),
+            documentsPartial = false,
+            audio = audioItems,
+            skippedForAccess = skippedForAccess,
+            unsupported = unsupported,
+            documentFailure = true,
+        )
+    val added = runCatching { repository.addDocuments(documents) }.getOrNull()
+    if (added == null || added <= 0) {
+        return@withContext SharedContentImport(
+            documentIds = emptyList(),
+            documentsPartial = false,
+            audio = audioItems,
+            skippedForAccess = skippedForAccess,
+            unsupported = unsupported,
+            documentFailure = true,
+        )
+    }
+    SharedContentImport(
+        documentIds = documents.map { it.toStableMediaId() },
+        // addDocuments silently skips formats it cannot represent, so only a full match is a safe
+        // licence to open the reader directly on a single shared file.
+        documentsPartial = added < documents.size,
+        audio = audioItems,
+        skippedForAccess = skippedForAccess,
+        unsupported = unsupported,
+        documentFailure = false,
+    )
+}
+
 private enum class Destination(val route: String, val title: String, val description: String) {
     Continue("continue", "Continue", "Pick up with local listening and reading"),
     Music("music", "Music", "Browse music on this device"),
@@ -207,6 +331,8 @@ fun MurmurApp(
     musicPlaylistRepository: MusicPlaylistRepository? = null,
     audiobookLibraryRepository: AudiobookLibraryRepository? = null,
     documentLibraryRepository: DocumentLibraryRepository? = null,
+    request: MurmurIntentRequest? = null,
+    onRequestHandled: () -> Unit = {},
 ) {
     LaunchedEffect(playbackController) {
         while (playbackController != null) {
@@ -223,6 +349,56 @@ fun MurmurApp(
         val backStackEntry by navController.currentBackStackEntryAsState()
         val currentRoute = backStackEntry?.destination?.route ?: Destination.Continue.route
         val title = Destination.fromRoute(currentRoute)?.title ?: "Murmur"
+        val context = LocalContext.current
+        val snackbarHostState = remember { SnackbarHostState() }
+
+        // Deep links, app shortcuts, "Open with" and Sharesheet hand-offs are handled here, where the
+        // controller is actually attached to the NavHost. The request is consumed first so a
+        // recomposition (or a failed import) can never replay it.
+        LaunchedEffect(request) {
+            val activeRequest = request ?: return@LaunchedEffect
+            onRequestHandled()
+            when (activeRequest) {
+                is MurmurIntentRequest.DeepLink -> {
+                    val route = deepLinkRoute(activeRequest) ?: return@LaunchedEffect
+                    navController.navigate(route) { launchSingleTop = true }
+                }
+                is MurmurIntentRequest.OpenContent -> {
+                    val imported = importSharedContent(context, activeRequest.uris, documentLibraryRepository)
+                    val notes = mutableListOf<String>()
+                    if (imported.skippedForAccess > 0) {
+                        notes += "${imported.skippedForAccess} file(s) couldn't be opened because Murmur couldn't keep access to them."
+                    }
+                    if (imported.unsupported > 0) {
+                        notes += "${imported.unsupported} file(s) weren't a supported audio or document format."
+                    }
+                    if (imported.audio.isNotEmpty()) {
+                        val controller = playbackController
+                        if (controller == null) {
+                            notes += "Playback isn't available right now."
+                        } else {
+                            controller.playSelected(imported.audio)
+                            navController.navigate(Destination.NowPlaying.route) { launchSingleTop = true }
+                        }
+                        if (imported.documentIds.isNotEmpty()) {
+                            notes += "${imported.documentIds.size} document(s) added to Read & Listen."
+                        }
+                    } else if (imported.documentIds.isNotEmpty()) {
+                        if (imported.documentsPartial) {
+                            notes += "Some shared documents were added to Read & Listen."
+                        }
+                        if (imported.documentIds.size == 1 && !imported.documentsPartial) {
+                            navController.navigate("reader/${Uri.encode(imported.documentIds.single())}") { launchSingleTop = true }
+                        } else {
+                            navController.navigate(Destination.Documents.route) { launchSingleTop = true }
+                        }
+                    } else if (imported.documentFailure && notes.isEmpty()) {
+                        notes += "Murmur couldn't add the shared document. Open the document library and choose the file again."
+                    }
+                    if (notes.isNotEmpty()) snackbarHostState.showSnackbar(notes.joinToString(" "))
+                }
+            }
+        }
 
         Scaffold(
             topBar = {
@@ -234,6 +410,7 @@ fun MurmurApp(
                     onSettings = { navController.navigate(Destination.Settings.route) },
                 )
             },
+            snackbarHost = { SnackbarHost(snackbarHostState) },
             bottomBar = {
                 if (playback.current != null && currentRoute != Destination.NowPlaying.route) {
                     MiniPlayer(

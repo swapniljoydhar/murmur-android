@@ -1,15 +1,13 @@
 package com.joy.murmur
 
 import android.content.Intent
-import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.lifecycle.DefaultLifecycleObserver
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleOwner
-import androidx.navigation.NavHostController
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import com.joy.murmur.data.settings.DataStoreSettingsRepository
 import com.joy.murmur.data.settings.settingsDataStore
 import com.joy.murmur.data.playback.PlaybackDatabase
@@ -63,13 +61,21 @@ class MainActivity : ComponentActivity() {
     private val documentLibraryRepository: DocumentLibraryRepository by lazy {
         RoomDocumentLibraryRepository(applicationContext, ReaderDocumentStore(PlaybackDatabase.getInstance(applicationContext)))
     }
-    private val navController: NavHostController by lazy { NavHostController(this) }
+
+    /**
+     * The intent request waiting to be handled by the composed UI. [MurmurApp] consumes it exactly once
+     * through `onRequestHandled`, using the real `NavHostController` that is attached to the `NavHost`.
+     */
+    private var pendingRequest by mutableStateOf<MurmurIntentRequest?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        handleIntent(intent)
-        lifecycle.addObserver(DeepLinkHandler())
+        // Only read the launch intent for a fresh launch: a configuration change re-delivers the same
+        // intent and must not replay a deep link or re-import shared files.
+        if (savedInstanceState == null) {
+            pendingRequest = MurmurIntents.parse(intent)
+        }
         setContent {
             MurmurApp(
                 settingsRepository = settingsRepository,
@@ -78,6 +84,8 @@ class MainActivity : ComponentActivity() {
                 musicPlaylistRepository = musicPlaylistRepository,
                 audiobookLibraryRepository = audiobookLibraryRepository,
                 documentLibraryRepository = documentLibraryRepository,
+                request = pendingRequest,
+                onRequestHandled = { pendingRequest = null },
             )
         }
     }
@@ -85,62 +93,14 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        handleIntent(intent)
-    }
-
-    private fun handleIntent(intent: Intent) {
-        val action = intent.action
-        val data = intent.data
-        
-        // Handle deep links
-        if (data != null && data.scheme == "murmur") {
-            val host = data.host
-            val path = data.path
-            when (host) {
-                "continue" -> navController?.navigate("continue")
-                "music" -> navController?.navigate("music")
-                "audiobooks" -> navController?.navigate("audiobooks")
-                "documents" -> navController?.navigate("documents")
-                "player" -> navController?.navigate("now-playing")
-                "reader" -> {
-                    val documentId = data.getPathSegments().getOrNull(1)
-                    documentId?.let { navController?.navigate("reader/$it") }
-                }
-            }
-            return
-        }
-
-        // Handle Open With / Share Into
-        if (action == Intent.ACTION_VIEW || action == Intent.ACTION_SEND) {
-            val uris = mutableListOf<Uri>()
-            if (data != null) {
-                uris.add(data)
-            }
-            intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM)?.forEach { uris.add(it) }
-            
-            if (uris.isNotEmpty()) {
-                val supported = uris.filter { uri ->
-                    val mime = contentResolver.getType(uri) ?: ""
-                    mime.startsWith("audio/") || mime.startsWith("text/") || 
-                    mime == "application/epub+zip" || mime == "application/pdf"
-                }
-                if (supported.isNotEmpty()) {
-                    // Navigate to documents screen, the library will handle the import
-                    navController?.navigate("documents")
-                }
-            }
-        }
+        // A plain launcher tap (ACTION_MAIN, no data) parses to null and must not discard a request
+        // that is still waiting to be handled.
+        MurmurIntents.parse(intent)?.let { pendingRequest = it }
     }
 
     override fun onDestroy() {
         playbackController.release()
         ttsGenerator.shutdown()
         super.onDestroy()
-    }
-
-    private inner class DeepLinkHandler : DefaultLifecycleObserver {
-        override fun onStart(owner: LifecycleOwner) {
-            handleIntent(intent)
-        }
     }
 }

@@ -41,6 +41,20 @@ The separate `TtsScheduler` and `BatchTtsManager` are not wired into the app. Ne
 - **Material 3**: Design system
 - **Glance**: Home screen widgets
 
+## Incoming intents
+
+`MainActivity` never navigates itself. It parses the launch/re-launch intent into a
+`MurmurIntentRequest` (`IntentRequest.kt`) and exposes it as Compose state; `MurmurApp` consumes it once
+through `onRequestHandled`, using the `NavHostController` that is actually attached to the `NavHost`.
+
+- `murmur://` links map from host + path segments to a destination inside `MurmurApp`, so the nav graph
+  stays the single source of truth for routes.
+- `ACTION_VIEW`, `ACTION_SEND` and `ACTION_SEND_MULTIPLE` payloads (including `ClipData`) are classified
+  as audio or document off the main thread, then either queued for playback or added to the document
+  library before the UI navigates. Nothing is imported without a persistable read grant.
+- Parsing a plain launcher intent yields nothing; a `savedInstanceState != null` relaunch does not replay
+  the original link.
+
 ## Key Design Decisions
 
 1. **Local-first**: No INTERNET permission; app-managed data stays in app storage, while source media remains at user-selected locations
