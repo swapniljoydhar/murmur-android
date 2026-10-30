@@ -26,15 +26,6 @@ interface SettingsRepository {
     val selectedSpeechVoice: Flow<String?>
         get() = flowOf(null)
 
-    val selectedNeuralVoice: Flow<String?>
-        get() = flowOf(null)
-
-    val neuralTtsSpeed: Flow<Float>
-        get() = flowOf(1f)
-
-    val outputProfiles: Flow<String>
-        get() = flowOf("[]")
-
     suspend fun setAppearanceMode(mode: AppearanceMode)
 
     suspend fun setStrictOfflineSpeech(enabled: Boolean)
@@ -44,12 +35,6 @@ interface SettingsRepository {
     suspend fun setBackgroundMusicRefresh(enabled: Boolean)
 
     suspend fun setSelectedSpeechVoice(voiceName: String?)
-
-    suspend fun setSelectedNeuralVoice(voiceId: String?)
-
-    suspend fun setNeuralTtsSpeed(speed: Float)
-
-    suspend fun setOutputProfiles(json: String)
 
     // Voice eligibility for Strict Offline Speech
     suspend fun checkVoiceEligibility(voiceName: String?): VoiceNetworkRequirement

@@ -24,8 +24,11 @@ import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.withContext
+import android.media.MediaMetadataRetriever
+import androidx.documentfile.provider.DocumentFile
 import com.joy.murmur.data.playback.MusicCatalogStore
 import com.joy.murmur.data.playback.MusicTrackEntity
+import com.joy.murmur.playback.toStableMediaId
 import java.util.UUID
 
 class MediaStoreMusicLibraryRepository(context: Context, private val catalogStore: MusicCatalogStore) : MusicLibraryRepository {
@@ -149,6 +152,57 @@ class MediaStoreMusicLibraryRepository(context: Context, private val catalogStor
                 catalogStore.upsertChangedTrack(item.toEntity(token))
             }
         }
+    }
+
+    override suspend fun importAudioUris(uris: List<Uri>, folderLabel: String?): Int = withContext(Dispatchers.IO) {
+        if (uris.isEmpty()) return@withContext 0
+        val nowSeconds = System.currentTimeMillis() / 1_000L
+        val importedEntities = uris.distinctBy(Uri::toString).mapNotNull { uri ->
+            val doc = DocumentFile.fromSingleUri(appContext, uri)
+            val rawName = doc?.name ?: uri.lastPathSegment?.substringAfterLast('/') ?: "Local audio"
+            val fallbackTitle = rawName.substringBeforeLast('.', rawName).trim().ifEmpty { rawName }
+            val mimeType = doc?.type ?: runCatching { appContext.contentResolver.getType(uri) }.getOrNull()
+
+            var title: String? = null
+            var artist: String? = null
+            var album: String? = null
+            var durationMs = 0L
+
+            val retriever = MediaMetadataRetriever()
+            try {
+                val opened = runCatching {
+                    retriever.setDataSource(appContext, uri)
+                    true
+                }.getOrDefault(false)
+                if (opened) {
+                    title = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE).usableMetadata()
+                    artist = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST).usableMetadata()
+                        ?: retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUMARTIST).usableMetadata()
+                    album = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUM).usableMetadata()
+                    durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+                        ?.toLongOrNull()
+                        ?.coerceAtLeast(0L) ?: 0L
+                }
+            } finally {
+                runCatching { retriever.release() }
+            }
+
+            val modifiedSeconds = doc?.lastModified()?.takeIf { it > 0L }?.div(1_000L) ?: nowSeconds
+            MusicTrackEntity(
+                id = uri.toStableMediaId(),
+                uri = uri.toString(),
+                title = title ?: fallbackTitle,
+                artist = artist,
+                album = album,
+                durationMs = durationMs,
+                relativePath = folderLabel?.takeIf(String::isNotBlank) ?: "Imported files",
+                mimeType = mimeType,
+                dateModifiedSeconds = modifiedSeconds,
+                syncToken = "saf-import",
+            )
+        }
+        catalogStore.importSafTracks(importedEntities)
+        importedEntities.size
     }
 
     private fun ensurePermission() {

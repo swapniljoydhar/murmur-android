@@ -110,6 +110,7 @@ import com.joy.murmur.playback.playbackPositionAtFraction
 import com.joy.murmur.playback.playbackPositionFraction
 import com.joy.murmur.playback.ReadAloudStatus
 import com.joy.murmur.playback.parseReadAloudMediaId
+import com.joy.murmur.playback.parseReadAloudStartMediaId
 import com.joy.murmur.playback.SleepTimer
 import com.joy.murmur.playback.SelectedAudio
 import com.joy.murmur.playback.readAloudMediaId
@@ -124,6 +125,12 @@ import com.joy.murmur.playback.OemCompatibility
 import com.joy.murmur.data.playback.PlaybackDatabase
 import com.joy.murmur.data.playback.ReadAloudSegmentMapEntity
 import com.joy.murmur.data.playback.ReaderDocumentStore
+import com.joy.murmur.data.storage.DocumentFileAudioImporter
+import com.joy.murmur.ui.components.EditorialHomeScreen
+import com.joy.murmur.ui.components.MurmurMiniPlayerBar
+import com.joy.murmur.ui.components.PlaybackSeekBar
+import com.joy.murmur.ui.components.PlayerTransportControls
+import com.joy.murmur.ui.components.PrivacyLegalScreen
 import com.joy.murmur.ui.theme.MurmurTheme
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
@@ -185,6 +192,7 @@ private enum class Destination(val route: String, val title: String, val descrip
     Settings("settings", "Settings", "Appearance and app preferences"),
     VoiceSettings("settings/voice", "Voice", "Read Aloud voice settings"),
     OemFix("oem-fix", "Fix Background Playback", "Resolve background playback restrictions"),
+    Privacy("privacy", "Privacy & Legal", "Offline privacy, storage, and legal disclosures"),
     NowPlaying("now-playing", "Now Playing", "Playback controls and queue");
 
     companion object {
@@ -194,8 +202,9 @@ private enum class Destination(val route: String, val title: String, val descrip
 
 private enum class SettingsTab(val label: String) {
     APPEARANCE("Appearance"),
-    VOICE("Read Aloud Voice"),
+    VOICE("Voice"),
     STORAGE("Storage"),
+    PRIVACY("Privacy"),
 }
 
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
@@ -207,6 +216,8 @@ fun MurmurApp(
     musicPlaylistRepository: MusicPlaylistRepository? = null,
     audiobookLibraryRepository: AudiobookLibraryRepository? = null,
     documentLibraryRepository: DocumentLibraryRepository? = null,
+    pendingRouteFlow: kotlinx.coroutines.flow.StateFlow<String?>? = null,
+    onRouteConsumed: () -> Unit = {},
 ) {
     LaunchedEffect(playbackController) {
         while (playbackController != null) {
@@ -218,8 +229,22 @@ fun MurmurApp(
     val playback by (playbackController?.snapshot ?: androidx.compose.runtime.remember {
         kotlinx.coroutines.flow.MutableStateFlow(PlaybackSnapshot())
     }).collectAsState()
+    val pendingRoute by (pendingRouteFlow ?: androidx.compose.runtime.remember {
+        kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
+    }).collectAsState()
     MurmurTheme(appearanceMode = appearanceMode) {
         val navController = rememberNavController()
+        LaunchedEffect(pendingRoute, navController) {
+            val targetRoute = pendingRoute ?: return@LaunchedEffect
+            if (targetRoute != Destination.Continue.route) {
+                runCatching {
+                    navController.navigate(targetRoute) {
+                        launchSingleTop = true
+                    }
+                }
+            }
+            onRouteConsumed()
+        }
         val backStackEntry by navController.currentBackStackEntryAsState()
         val currentRoute = backStackEntry?.destination?.route ?: Destination.Continue.route
         val title = Destination.fromRoute(currentRoute)?.title ?: "Murmur"
@@ -236,10 +261,12 @@ fun MurmurApp(
             },
             bottomBar = {
                 if (playback.current != null && currentRoute != Destination.NowPlaying.route) {
-                    MiniPlayer(
+                    MurmurMiniPlayerBar(
                         snapshot = playback,
                         onOpen = { navController.navigate(Destination.NowPlaying.route) },
+                        onPrevious = { playbackController?.previous() },
                         onToggle = { playbackController?.togglePlayPause() },
+                        onNext = { playbackController?.next() },
                     )
                 }
             },
@@ -283,9 +310,38 @@ private fun MurmurNavigation(
     documentLibraryRepository: DocumentLibraryRepository?,
     playback: PlaybackSnapshot,
 ) {
+    val musicSnapshot by (musicLibraryRepository?.observeLibrary() ?: remember {
+        kotlinx.coroutines.flow.MutableStateFlow<MusicLibrarySnapshot?>(null)
+    }).collectAsState(initial = null)
+    val homeAudiobooks by (audiobookLibraryRepository?.observeBooks() ?: remember {
+        kotlinx.coroutines.flow.MutableStateFlow(emptyList<Audiobook>())
+    }).collectAsState(initial = emptyList())
+    val homeDocuments by (documentLibraryRepository?.observeDocuments() ?: remember {
+        kotlinx.coroutines.flow.MutableStateFlow(emptyList<ReaderDocument>())
+    }).collectAsState(initial = emptyList())
+
     NavHost(navController, startDestination = Destination.Continue.route, modifier = Modifier.padding(contentPadding)) {
         composable(Destination.Continue.route) {
-            ContinueScreen { destination -> navController.navigate(destination.route) }
+            EditorialHomeScreen(
+                playback = playback,
+                musicCount = musicSnapshot?.tracks?.size ?: 0,
+                audiobooks = homeAudiobooks,
+                documents = homeDocuments,
+                onOpenMusic = { navController.navigate(Destination.Music.route) },
+                onOpenAudiobooks = { navController.navigate(Destination.Audiobooks.route) },
+                onOpenDocuments = { navController.navigate(Destination.Documents.route) },
+                onOpenNowPlaying = { navController.navigate(Destination.NowPlaying.route) },
+                onTogglePlayback = { playbackController?.togglePlayPause() },
+                onResumeAudiobook = { book ->
+                    val selected = SelectedAudio(book.id, book.uri, book.title, PlaybackContentType.AUDIOBOOK, book.author)
+                    if (book.isInProgress) playbackController?.playSelectedAt(selected, book.positionMs)
+                    else playbackController?.playSelected(listOf(selected))
+                },
+                onResumeDocument = { document ->
+                    navController.navigate("reader/${Uri.encode(document.id)}")
+                },
+                onOpenPrivacy = { navController.navigate(Destination.Privacy.route) },
+            )
         }
         composable(Destination.Music.route) {
             MusicLibraryScreen(musicLibraryRepository, musicPlaylistRepository, playbackController, settingsRepository)
@@ -308,6 +364,9 @@ private fun MurmurNavigation(
         }
         composable(Destination.Settings.route) {
             SettingsScreen(settingsRepository, playback.current != null)
+        }
+        composable(Destination.Privacy.route) {
+            PrivacyLegalScreen()
         }
         composable(Destination.OemFix.route) {
             val fixLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { _ ->
@@ -343,7 +402,11 @@ private fun MurmurNavigation(
                 controller = playbackController,
                 audiobookLibraryRepository = audiobookLibraryRepository,
                 onReturnToDocument = {
-                    val documentId = playback.current?.id?.split('|')?.getOrNull(1)?.let(Uri::decode)
+                    val currentId = playback.current?.id
+                    val documentId = currentId?.let { id ->
+                        parseReadAloudMediaId(id)?.documentId
+                            ?: parseReadAloudStartMediaId(id)?.documentId
+                    }
                     if (documentId != null) navController.navigate("reader/${Uri.encode(documentId)}")
                     else navController.navigate(Destination.Documents.route)
                 },
@@ -441,14 +504,45 @@ private fun MusicLibraryScreen(
         if (granted) scope.launch { loadLibrary() } else permissionDenied = true
     }
     val pickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
-        val retainedUris = uris.filter { retainReadAccess(context.contentResolver, it) }
-        val selected = retainedUris.map { uri ->
-            SelectedAudio(uri.toStableMediaId(), uri, queryDisplayName(context.contentResolver, uri), PlaybackContentType.MUSIC)
+        if (uris.isEmpty()) return@rememberLauncherForActivityResult
+        scope.launch {
+            val resolved = DocumentFileAudioImporter.resolveAudioFilesFromSingleUris(context, uris)
+            musicLibraryRepository?.importAudioUris(resolved)
+            val selected = resolved.map { uri ->
+                SelectedAudio(uri.toStableMediaId(), uri, queryDisplayName(context.contentResolver, uri), PlaybackContentType.MUSIC)
+            }
+            if (resolved.size < uris.size) {
+                error = "Skipped ${uris.size - resolved.size} files that weren't supported audio or couldn't retain read access."
+            }
+            if (selected.isNotEmpty()) playbackController?.playSelected(selected)
         }
-        if (retainedUris.size < uris.size) {
-            error = "Skipped ${uris.size - retainedUris.size} files because Murmur couldn't retain access. Choose them again from a provider that supports ongoing access."
+    }
+    val folderPickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { treeUri ->
+        if (treeUri == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            loading = true
+            error = null
+            try {
+                val resolved = DocumentFileAudioImporter.resolveAudioFilesFromTree(context, treeUri)
+                if (resolved.audioUris.isEmpty()) {
+                    error = "No supported audio files were found in ${resolved.folderName}."
+                } else {
+                    val importedCount = musicLibraryRepository?.importAudioUris(resolved.audioUris, folderLabel = resolved.folderName) ?: 0
+                    if (importedCount == 0 && musicLibraryRepository == null) {
+                        val selected = resolved.audioUris.map { uri ->
+                            SelectedAudio(uri.toStableMediaId(), uri, queryDisplayName(context.contentResolver, uri), PlaybackContentType.MUSIC)
+                        }
+                        playbackController?.playSelected(selected)
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                error = "Murmur couldn't import that folder. Please try choosing it again."
+            } finally {
+                loading = false
+            }
         }
-        if (selected.isNotEmpty()) playbackController?.playSelected(selected)
     }
 
     fun requestLibrary() {
@@ -514,9 +608,25 @@ private fun MusicLibraryScreen(
         modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 18.dp),
         verticalArrangement = Arrangement.spacedBy(18.dp),
     ) {
-        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Your music", style = MaterialTheme.typography.headlineSmall)
             Text("Music on this device, kept on this device.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedButton(
+                    onClick = { folderPickerLauncher.launch(null) },
+                    enabled = !loading,
+                    modifier = Modifier.testTag("music_import_folder_button"),
+                ) {
+                    Text("Import folder")
+                }
+                TextButton(
+                    onClick = { pickerLauncher.launch(arrayOf("audio/*")) },
+                    enabled = !loading,
+                    modifier = Modifier.testTag("music_import_files_button"),
+                ) {
+                    Text("Choose audio files")
+                }
+            }
         }
         if (library?.hasScanned == true) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
@@ -593,19 +703,25 @@ private fun MusicLibraryScreen(
                     Column(Modifier.fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         Text("Find music on this phone", style = MaterialTheme.typography.titleLarge)
                         Text(
-                            if (permissionDenied) "Audio access wasn't granted. You can allow it to browse the library, or choose individual files instead."
-                            else "Scan the device's indexed audio library, or choose individual files. Murmur doesn't upload your music.",
+                            if (permissionDenied) "Audio access wasn't granted. You can allow it to browse the library, or import a folder or individual files directly."
+                            else "Scan the device's indexed audio library, or import a local folder or files without broad media permissions. Murmur doesn't upload your music.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
-                        Button(onClick = ::requestLibrary) { Text(if (permissionDenied) "Allow audio access" else "Scan device") }
-                        TextButton(onClick = { pickerLauncher.launch(arrayOf("audio/*")) }) { Text("Choose audio files") }
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Button(onClick = ::requestLibrary) { Text(if (permissionDenied) "Allow audio access" else "Scan device") }
+                            OutlinedButton(onClick = { folderPickerLauncher.launch(null) }) { Text("Import folder") }
+                        }
                     }
                 }
             }
             allTracks.isEmpty() -> {
                 if (error != null) Text(error.orEmpty(), color = MaterialTheme.colorScheme.error)
-                EmptyMusicLibraryCard(onScan = ::requestLibrary, onChooseFiles = { pickerLauncher.launch(arrayOf("audio/*")) })
+                EmptyMusicLibraryCard(
+                    onScan = ::requestLibrary,
+                    onImportFolder = { folderPickerLauncher.launch(null) },
+                    onChooseFiles = { pickerLauncher.launch(arrayOf("audio/*")) },
+                )
             }
             else -> when (selectedTab) {
                 MusicBrowseTab.SONGS -> {
@@ -734,17 +850,24 @@ private fun MusicLibraryScreen(
 }
 
 @Composable
-private fun EmptyMusicLibraryCard(onScan: () -> Unit, onChooseFiles: () -> Unit) {
+private fun EmptyMusicLibraryCard(
+    onScan: () -> Unit,
+    onImportFolder: () -> Unit,
+    onChooseFiles: () -> Unit,
+) {
     OutlinedCard(modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.fillMaxWidth().padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("♫", style = MaterialTheme.typography.displaySmall, color = MaterialTheme.colorScheme.primary)
             Text("No music found", style = MaterialTheme.typography.titleLarge)
             Text(
-                "There are no indexed music files on this device yet. You can scan again or select audio files yourself.",
+                "There are no indexed music files on this device yet. You can scan again, import a local folder, or select audio files yourself.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            Button(onClick = onScan) { Text("Scan again") }
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Button(onClick = onScan) { Text("Scan again") }
+                OutlinedButton(onClick = onImportFolder) { Text("Import folder") }
+            }
             TextButton(onClick = onChooseFiles) { Text("Choose audio files") }
         }
     }
@@ -949,6 +1072,13 @@ private fun DocumentLibraryScreen(repository: DocumentLibraryRepository?, onOpen
         Text("Read your documents here; listen from the open reader.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Button(onClick = { picker.launch(arrayOf("text/plain", "text/markdown", "text/x-markdown", "text/html", "application/epub+zip", "application/pdf")) }, enabled = repository != null && !adding) {
             Text(if (adding) "Adding…" else "Add documents")
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.VANILLA_ICE_CREAM) {
+            Text(
+                "Note: PDF pages render visually on all Android versions, while PDF text extraction, search, and Read Aloud require Android 15 (API 35) or newer.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
         message?.let { Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant) }
         if (documents.isEmpty()) {
@@ -1744,17 +1874,43 @@ private fun AudiobookLibraryScreen(
                 adding = true
                 error = null
                 try {
-                    val retainedUris = uris.filter { retainReadAccess(context.contentResolver, it) }
-                    val added = repository?.addBooks(retainedUris) ?: 0
+                    val resolvedUris = DocumentFileAudioImporter.resolveAudioFilesFromSingleUris(context, uris)
+                    val added = repository?.addBooks(resolvedUris) ?: 0
                     error = when {
-                        retainedUris.size < uris.size -> "Added $added audiobooks. ${uris.size - retainedUris.size} couldn't be added because Murmur couldn't retain access. Choose those files again from a provider that supports ongoing access."
-                        added < retainedUris.size -> "Added $added supported audiobooks. Some selected files weren't recognized as supported audio."
+                        resolvedUris.size < uris.size -> "Added $added audiobooks. ${uris.size - resolvedUris.size} couldn't be added because Murmur couldn't retain access or they weren't audio files."
+                        added < resolvedUris.size -> "Added $added supported audiobooks. Some selected files weren't recognized as supported audio."
                         else -> null
                     }
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (_: Exception) {
                     error = "Murmur couldn't add those files. Please choose them again."
+                } finally {
+                    adding = false
+                }
+            }
+        }
+    }
+
+    val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { treeUri ->
+        if (treeUri != null) {
+            scope.launch {
+                adding = true
+                error = null
+                try {
+                    val resolved = DocumentFileAudioImporter.resolveAudioFilesFromTree(context, treeUri)
+                    if (resolved.audioUris.isEmpty()) {
+                        error = "No supported audiobook files were found in ${resolved.folderName}."
+                    } else {
+                        val added = repository?.addBooks(resolved.audioUris) ?: 0
+                        if (added == 0) {
+                            error = "Those files are already in your library or couldn't be added."
+                        }
+                    }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    error = "Murmur couldn't import that audiobook folder. Please choose it again."
                 } finally {
                     adding = false
                 }
@@ -1772,7 +1928,18 @@ private fun AudiobookLibraryScreen(
         Text("Murmur  •  Audiobooks", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary)
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
             Text("My books", style = MaterialTheme.typography.headlineSmall)
-            TextButton(onClick = { filePicker.launch(arrayOf("audio/*")) }, enabled = !adding) { Text("+ Add books") }
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                OutlinedButton(
+                    onClick = { folderPicker.launch(null) },
+                    enabled = !adding && repository != null,
+                    modifier = Modifier.testTag("audiobooks_import_folder_button"),
+                ) { Text("Import folder") }
+                TextButton(
+                    onClick = { filePicker.launch(arrayOf("audio/*")) },
+                    enabled = !adding && repository != null,
+                    modifier = Modifier.testTag("audiobooks_import_files_button"),
+                ) { Text("+ Add files") }
+            }
         }
         OutlinedTextField(
             value = query,
@@ -1788,8 +1955,11 @@ private fun AudiobookLibraryScreen(
             books.isEmpty() -> OutlinedCard(modifier = Modifier.fillMaxWidth()) {
                 Column(Modifier.fillMaxWidth().padding(22.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text("Your library is quiet", style = MaterialTheme.typography.titleLarge)
-                    Text("Add audiobook files from this device. Murmur keeps them and your listening place on this phone.", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Button(onClick = { filePicker.launch(arrayOf("audio/*")) }) { Text("Add audiobook files") }
+                    Text("Add audiobook files or an entire folder from this device. Murmur keeps them and your listening place on this phone.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Button(onClick = { filePicker.launch(arrayOf("audio/*")) }) { Text("Add audiobook files") }
+                        OutlinedButton(onClick = { folderPicker.launch(null) }) { Text("Import folder") }
+                    }
                 }
             }
             matchingBooks.isEmpty() -> Text("No books match that search.", color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1840,59 +2010,10 @@ private fun formatPlaybackTime(milliseconds: Long): String {
 }
 
 @Composable
-private fun ContinueScreen(onOpenDestination: (Destination) -> Unit) {
-    Column(
-        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 24.dp, vertical = 28.dp),
-        verticalArrangement = Arrangement.spacedBy(20.dp),
-    ) {
-        Text("A quiet place for your local media.", style = MaterialTheme.typography.headlineMedium)
-        Text("Choose local audio, or open a document to read and listen in one place.", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            listOf(Destination.Music, Destination.Audiobooks, Destination.Documents).forEach { destination ->
-                DestinationCard(destination) { onOpenDestination(destination) }
-            }
-        }
-    }
-}
-
-@Composable
-private fun DestinationCard(destination: Destination, onClick: () -> Unit) {
-    OutlinedCard(
-        onClick = onClick,
-        modifier = Modifier.fillMaxWidth().testTag("destination-${destination.route}"),
-        colors = CardDefaults.outlinedCardColors(containerColor = MaterialTheme.colorScheme.surface),
-    ) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 18.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text(destination.title, style = MaterialTheme.typography.titleMedium)
-                Text(destination.description, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            Text("Open", color = MaterialTheme.colorScheme.primary)
-        }
-    }
-}
-
-@Composable
 private fun EmptySectionScreen(title: String, message: String) {
     Column(Modifier.fillMaxSize().padding(horizontal = 28.dp, vertical = 40.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text(title, style = MaterialTheme.typography.headlineSmall)
         Text(message, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    }
-}
-
-@Composable
-private fun MiniPlayer(snapshot: PlaybackSnapshot, onOpen: () -> Unit, onToggle: () -> Unit) {
-    val current = snapshot.current ?: return
-    Row(
-        Modifier.fillMaxWidth().clickable(onClick = onOpen).padding(horizontal = 16.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        Column(Modifier.weight(1f)) {
-            Text(current.title, style = MaterialTheme.typography.titleSmall, maxLines = 1)
-            Text(current.contentType.displayName, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-        TextButton(onClick = onToggle) { Text(if (snapshot.isPlaying) "Pause" else "Play") }
     }
 }
 
@@ -2006,16 +2127,17 @@ private fun NowPlayingScreen(
         Text(current.title, style = MaterialTheme.typography.headlineSmall)
         Text(current.contentType.displayName, color = MaterialTheme.colorScheme.onSurfaceVariant)
         SleepTimerControl(controller)
-        Slider(
-            value = snapshot.positionMs.coerceIn(0L, snapshot.durationMs.coerceAtLeast(1L)).toFloat(),
-            onValueChange = { controller?.seekTo(it.toLong()) },
-            valueRange = 0f..snapshot.durationMs.coerceAtLeast(1L).toFloat(),
+        PlaybackSeekBar(
+            positionMs = snapshot.positionMs,
+            durationMs = snapshot.durationMs,
+            onSeekTo = { controller?.seekTo(it) },
         )
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-            TextButton(onClick = { controller?.previous() }) { Text("Previous") }
-            Button(onClick = { controller?.togglePlayPause() }) { Text(if (snapshot.isPlaying) "Pause" else "Play") }
-            TextButton(onClick = { controller?.next() }) { Text("Next") }
-        }
+        PlayerTransportControls(
+            isPlaying = snapshot.isPlaying,
+            onPrevious = { controller?.previous() },
+            onTogglePlayPause = { controller?.togglePlayPause() },
+            onNext = { controller?.next() },
+        )
         Text("Up Next", style = MaterialTheme.typography.titleLarge)
         TextButton(onClick = { controller?.clearQueue() }) { Text("Clear queue") }
         snapshot.items.forEachIndexed { index, item ->
@@ -2042,8 +2164,7 @@ private fun ReadAloudPlayerScreen(snapshot: PlaybackSnapshot, controller: Playba
     val current = snapshot.current ?: return
     val failure by ReadAloudStatus.failure.collectAsState()
     val currentDocumentId = parseReadAloudMediaId(current.id)?.documentId
-        ?: current.id.takeIf { it.startsWith("read_aloud_start|") }
-            ?.split('|')?.getOrNull(1)?.let(Uri::decode)
+        ?: parseReadAloudStartMediaId(current.id)?.documentId
     val currentFailure = failure?.takeIf { it.documentId == currentDocumentId }
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -2060,16 +2181,17 @@ private fun ReadAloudPlayerScreen(snapshot: PlaybackSnapshot, controller: Playba
             Text(it.message, color = MaterialTheme.colorScheme.error)
             Text("Return to the document to retry from the saved position.", color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        Slider(
-            value = snapshot.positionMs.coerceIn(0L, snapshot.durationMs.coerceAtLeast(1L)).toFloat(),
-            onValueChange = { controller?.seekTo(it.toLong()) },
-            valueRange = 0f..snapshot.durationMs.coerceAtLeast(1L).toFloat(),
+        PlaybackSeekBar(
+            positionMs = snapshot.positionMs,
+            durationMs = snapshot.durationMs,
+            onSeekTo = { controller?.seekTo(it) },
         )
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-            TextButton(onClick = { controller?.previous() }) { Text("Previous") }
-            Button(onClick = { controller?.togglePlayPause() }) { Text(if (snapshot.isPlaying) "Pause" else "Play") }
-            TextButton(onClick = { controller?.next() }) { Text("Next") }
-        }
+        PlayerTransportControls(
+            isPlaying = snapshot.isPlaying,
+            onPrevious = { controller?.previous() },
+            onTogglePlayPause = { controller?.togglePlayPause() },
+            onNext = { controller?.next() },
+        )
         TextButton(onClick = onReturnToDocument) { Text("Return to document") }
         TextButton(onClick = {
             // Return to Text: save last spoken position before stopping
@@ -2135,22 +2257,17 @@ private fun AudiobookPlayerScreen(
             )
             TextButton(onClick = onOpenAudiobookLibrary) { Text("Return to Audiobooks") }
         }
-        Column(Modifier.fillMaxWidth()) {
-            Slider(
-                value = playbackPositionFraction(snapshot.positionMs, snapshot.durationMs),
-                onValueChange = { controller?.seekTo(playbackPositionAtFraction(it, snapshot.durationMs)) },
-                valueRange = 0f..1f,
-            )
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text(formatMediaPosition(snapshot.positionMs), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text(formatMediaPosition(snapshot.durationMs), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-        }
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceEvenly) {
-            TextButton(onClick = { controller?.previous() }) { Text("Previous") }
-            Button(onClick = { controller?.togglePlayPause() }) { Text(if (snapshot.isPlaying) "Pause" else "Play") }
-            TextButton(onClick = { controller?.next() }) { Text("Next") }
-        }
+        PlaybackSeekBar(
+            positionMs = snapshot.positionMs,
+            durationMs = snapshot.durationMs,
+            onSeekTo = { controller?.seekTo(it) },
+        )
+        PlayerTransportControls(
+            isPlaying = snapshot.isPlaying,
+            onPrevious = { controller?.previous() },
+            onTogglePlayPause = { controller?.togglePlayPause() },
+            onNext = { controller?.next() },
+        )
         TextButton(onClick = { controller?.setPlaybackSpeed(speedSteps[(speedIndex + 1) % speedSteps.size]) }) {
             Text("Speed  ${"%.2f".format(snapshot.playbackSpeed).trimEnd('0').trimEnd('.')}×")
         }
@@ -2327,6 +2444,7 @@ private fun SettingsScreen(settingsRepository: SettingsRepository, playbackInUse
                 }
                 SettingsTab.VOICE -> VoiceSettingsContent(settingsRepository)
                 SettingsTab.STORAGE -> StorageCenterScreen(playbackInUse)
+                SettingsTab.PRIVACY -> PrivacyLegalScreen()
             }
         }
     }

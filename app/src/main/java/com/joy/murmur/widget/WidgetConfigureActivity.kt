@@ -26,6 +26,8 @@ class WidgetConfigureActivity : AppCompatActivity() {
         }
 
         findViewById<AppCompatButton>(R.id.btn_done).setOnClickListener {
+            val appWidgetManager = AppWidgetManager.getInstance(this)
+            NowPlayingWidget().updateAppWidget(this, appWidgetManager, widgetId)
             val resultValue = Intent()
             resultValue.putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, widgetId)
             setResult(Activity.RESULT_OK, resultValue)

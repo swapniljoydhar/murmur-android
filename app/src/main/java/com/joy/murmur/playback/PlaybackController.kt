@@ -1,4 +1,4 @@
-﻿package com.joy.murmur.playback
+package com.joy.murmur.playback
 
 import android.content.ComponentName
 import android.content.Context
@@ -38,10 +38,9 @@ import java.util.concurrent.locks.ReentrantLock
 
 @OptIn(UnstableApi::class)
 class PlaybackController(
-    context: Context, 
+    context: Context,
     private val store: PlaybackStore,
     private val sourceInfoExtractor: SourceInfoExtractor,
-    private val outputProfileManager: OutputProfileManager,
 ) {
     private val appContext = context.applicationContext
     private val supervisorJob = SupervisorJob()
@@ -49,34 +48,50 @@ class PlaybackController(
     private val mainHandler = Handler(Looper.getMainLooper())
     private val mutableSnapshot = MutableStateFlow(PlaybackSnapshot())
     val snapshot: StateFlow<PlaybackSnapshot> = mutableSnapshot.asStateFlow()
-    
+
     private var controllerFuture: ListenableFuture<MediaController>? = null
     private var controller: MediaController? = null
     private var controllerJob: Job? = null
     private val controllerLock = ReentrantLock()
+    private val positionTicker = object : Runnable {
+        override fun run() {
+            val active = controller ?: return
+            publish(active)
+            if (active.isPlaying) {
+                mainHandler.postDelayed(this, 250L)
+            }
+        }
+    }
 
     init {
         val token = SessionToken(appContext, ComponentName(appContext, PlaybackService::class.java))
         controllerFuture = MediaController.Builder(appContext, token).buildAsync().also { future ->
             future.addListener({
                 scope.launch {
-                    runCatching { 
-                        withTimeout(10_000L) { future.get() } 
+                    runCatching {
+                        withTimeout(10_000L) { future.get() }
                     }.onSuccess { connected ->
                         controllerLock.lock()
                         try {
                             controller = connected
                             controllerJob = scope.launch(Dispatchers.Main.immediate) {
                                 connected.addListener(object : Player.Listener {
-                                    override fun onEvents(player: Player, events: Player.Events) = publish(player)
+                                    override fun onEvents(player: Player, events: Player.Events) {
+                                        publish(player)
+                                        mainHandler.removeCallbacks(positionTicker)
+                                        if (player.isPlaying) {
+                                            mainHandler.postDelayed(positionTicker, 250L)
+                                        }
+                                    }
                                 })
                                 publish(connected)
+                                if (connected.isPlaying) {
+                                    mainHandler.postDelayed(positionTicker, 250L)
+                                }
                             }
                         } finally {
                             controllerLock.unlock()
                         }
-                    }.onFailure { e ->
-                        // Connection failed; controller remains null
                     }
                 }
             }, { command -> mainHandler.post(command) })
@@ -122,6 +137,7 @@ class PlaybackController(
     }
 
     fun release() {
+        mainHandler.removeCallbacks(positionTicker)
         controllerLock.lock()
         try {
             controllerJob?.cancel()
@@ -259,7 +275,15 @@ class PlaybackController(
 
     fun startReadAloud(documentId: String, documentTitle: String, documentUri: Uri, mimeType: String, startChar: Long, continuous: Boolean, strictOffline: Boolean) {
         val mediaItem = MediaItem.Builder()
-            .setMediaId("read_aloud_start|${Uri.encode(documentId)}|$startChar|$mimeType|${strictOffline}|${if (continuous) "continuous" else "page"}")
+            .setMediaId(
+                readAloudStartMediaId(
+                    documentId = documentId,
+                    startChar = startChar,
+                    mimeType = mimeType,
+                    strictOffline = strictOffline,
+                    continuous = continuous,
+                ),
+            )
             .setUri(documentUri)
             .setMediaMetadata(
                 MediaMetadata.Builder()

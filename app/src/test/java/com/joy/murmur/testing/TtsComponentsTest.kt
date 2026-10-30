@@ -142,28 +142,63 @@ class TtsComponentsTest {
     }
 
     @Test
-    fun `TtsScheduler - bounded queue capacity`() = runBlocking(Dispatchers.IO) {
-        // Verify queue capacity is bounded
-        // The TtsScheduler uses Channel<GenerationTask>(100)
-        // We can't easily test this without mocking, but we can verify constants
-        
-        // The queue capacity is 100 in the implementation
-        val expectedCapacity = 100
-        assertTrue("Queue capacity should be bounded", expectedCapacity == 100)
+    fun `readWavHeader - parses exact sampleRate channels bitsPerSample and duration`() {
+        val sampleRate = 44_100
+        val channels = 2
+        val bitsPerSample = 16
+        val durationSeconds = 2
+        val dataBytes = sampleRate * channels * (bitsPerSample / 8) * durationSeconds // 352,800 bytes = 2000 ms
+        val wavBytes = buildPcmWavBytes(
+            sampleRate = sampleRate,
+            channels = channels,
+            bitsPerSample = bitsPerSample,
+            pcmByteCount = dataBytes,
+        )
+        val wavFile = File(cacheDir, "stereo_44100.wav").apply { writeBytes(wavBytes) }
+
+        val header = readWavHeader(wavFile)
+        assertNotNull("Valid PCM WAV header should parse", header)
+        assertEquals(44_100, header!!.sampleRate)
+        assertEquals(2, header.channelCount)
+        assertEquals(16, header.bitsPerSample)
+        assertEquals(dataBytes.toLong(), header.dataBytes)
+        assertEquals(2_000L, header.durationMs)
     }
 
     @Test
-    fun `TtsScheduler - max concurrent generations`() {
-        // Verify max concurrent generations
-        val maxConcurrent = 2
-        assertTrue("Max concurrent generations should be 2", maxConcurrent == 2)
+    fun `readWavHeader - rejects non-RIFF and truncated files`() {
+        val invalid = File(cacheDir, "not_a_wav.wav").apply { writeBytes(ByteArray(128) { 0x42 }) }
+        val truncated = File(cacheDir, "tiny.wav").apply { writeBytes(ByteArray(12) { 0x52 }) }
+
+        assertNull(readWavHeader(invalid))
+        assertNull(readWavHeader(truncated))
     }
 
-    @Test
-    fun `TtsScheduler - look ahead time`() {
-        // Verify look-ahead time
-        val lookAheadMs = 60_000L
-        assertTrue("Look-ahead should be 60 seconds", lookAheadMs == 60_000L)
+    private fun buildPcmWavBytes(
+        sampleRate: Int,
+        channels: Int,
+        bitsPerSample: Int,
+        pcmByteCount: Int,
+    ): ByteArray {
+        val byteRate = sampleRate * channels * (bitsPerSample / 8)
+        val blockAlign = channels * (bitsPerSample / 8)
+        val totalSize = 44 + pcmByteCount
+        val buffer = java.nio.ByteBuffer.allocate(totalSize).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        buffer.put("RIFF".toByteArray(Charsets.US_ASCII))
+        buffer.putInt(totalSize - 8)
+        buffer.put("WAVE".toByteArray(Charsets.US_ASCII))
+        buffer.put("fmt ".toByteArray(Charsets.US_ASCII))
+        buffer.putInt(16)
+        buffer.putShort(1) // PCM
+        buffer.putShort(channels.toShort())
+        buffer.putInt(sampleRate)
+        buffer.putInt(byteRate)
+        buffer.putShort(blockAlign.toShort())
+        buffer.putShort(bitsPerSample.toShort())
+        buffer.put("data".toByteArray(Charsets.US_ASCII))
+        buffer.putInt(pcmByteCount)
+        buffer.position(totalSize)
+        return buffer.array()
     }
 
     @Test

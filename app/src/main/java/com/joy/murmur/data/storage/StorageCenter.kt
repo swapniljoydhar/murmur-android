@@ -18,40 +18,72 @@ class StorageCenter(context: Context, private val db: PlaybackDatabase = Playbac
     private val appContext = context.applicationContext
     private val databaseFile = File(db.openHelper.writableDatabase.path ?: appContext.getDatabasePath("murmur.db").absolutePath)
     private val ttsCacheDir = File(appContext.cacheDir, "read-aloud")
-    private val neuralVoicesDir = File(appContext.filesDir, "neural-voices")
-    private val exportsDir = File(appContext.getExternalFilesDir(null) ?: appContext.filesDir, "Murmur/Exports")
     private val tempDir = File(appContext.cacheDir, "temp")
     private val databaseTables = listOf(
-        "listening_progress", "audiobook_library",
-        "audiobook_bookmarks", "audiobook_chapters", "processor_settings", "music_catalog",
-        "music_catalog_state", "music_playlists", "music_playlist_tracks", "reader_documents",
-        "reader_bookmarks", "document_structures", "batch_jobs", "batch_work_units",
+        "listening_progress",
+        "audiobook_library",
+        "audiobook_bookmarks",
+        "audiobook_chapters",
+        "music_catalog",
+        "music_catalog_state",
+        "music_playlists",
+        "music_playlist_tracks",
+        "reader_documents",
+        "reader_bookmarks",
+        "document_structures",
+        "read_aloud_segment_map",
     )
 
     data class StorageUsage(
         val ttsCacheBytes: Long,
-        val neuralVoicesBytes: Long,
-        val exportsBytes: Long,
         val databaseBytes: Long,
         val tempBytes: Long,
         val totalBytes: Long,
         val availableBytes: Long,
     )
 
+    suspend fun clearGeneratedSpeechCache(): Long = withContext(Dispatchers.IO) {
+        val dao = db.playbackDao()
+        val protectedNames = dao.getQueue().mapNotNull { item ->
+            Uri.parse(item.uri).takeIf { it.scheme == "file" }?.lastPathSegment
+        }.toSet()
+        val protectedKeys = protectedNames.map { it.removeSuffix(".wav") }.toSet()
+        var reclaimed = 0L
+        if (ttsCacheDir.isDirectory) {
+            ttsCacheDir.walkBottomUp().forEach { file ->
+                if (file.isFile && file.name !in protectedNames) {
+                    val length = file.length()
+                    if (file.delete()) reclaimed += length
+                }
+            }
+        }
+        dao.getAllTtsCacheEntries().forEach { entry ->
+            if (entry.cacheKey !in protectedKeys || !File(entry.filePath).isFile) {
+                dao.deleteTtsCacheEntry(entry.cacheKey)
+            }
+        }
+        if (tempDir.isDirectory) {
+            tempDir.walkBottomUp().forEach { file ->
+                if (file.isFile) {
+                    val length = file.length()
+                    if (file.delete()) reclaimed += length
+                }
+            }
+        }
+        reclaimed
+    }
+
     suspend fun getStorageUsage(): StorageUsage = withContext(Dispatchers.IO) {
+        checkpointWal()
         val ttsCacheBytes = directorySize(ttsCacheDir)
-        val neuralVoicesBytes = directorySize(neuralVoicesDir)
-        val exportsBytes = directorySize(exportsDir)
         val databaseBytes = listOf(databaseFile, File("${databaseFile.path}-wal"), File("${databaseFile.path}-shm"))
             .sumOf(::fileSize)
         val tempBytes = directorySize(tempDir)
         StorageUsage(
             ttsCacheBytes = ttsCacheBytes,
-            neuralVoicesBytes = neuralVoicesBytes,
-            exportsBytes = exportsBytes,
             databaseBytes = databaseBytes,
             tempBytes = tempBytes,
-            totalBytes = ttsCacheBytes + neuralVoicesBytes + exportsBytes + databaseBytes + tempBytes,
+            totalBytes = ttsCacheBytes + databaseBytes + tempBytes,
             availableBytes = StatFs(appContext.filesDir.absolutePath).let { it.availableBlocksLong * it.blockSizeLong },
         )
     }
@@ -74,6 +106,7 @@ class StorageCenter(context: Context, private val db: PlaybackDatabase = Playbac
     internal suspend fun createBackupBytes() = withContext(Dispatchers.IO) { createBackupBytesInternal() }
 
     private suspend fun createBackupBytesInternal(): ByteArray {
+        checkpointWal()
         val content = db.withTransaction {
             val sqlDb = db.openHelper.writableDatabase
             val tableData = databaseTables.associateWith { table ->
@@ -132,7 +165,14 @@ class StorageCenter(context: Context, private val db: PlaybackDatabase = Playbac
                 check(!cursor.moveToFirst()) { "Backup contains broken record links." }
             }
         }
+        checkpointWal()
         return MurmurBackupFormat.summary(content)
+    }
+
+    private fun checkpointWal() {
+        runCatching {
+            db.openHelper.writableDatabase.query("PRAGMA wal_checkpoint(FULL)").close()
+        }
     }
 
     private fun readBackup(uri: Uri): ByteArray {

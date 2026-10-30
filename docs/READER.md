@@ -37,9 +37,9 @@ Reader text-size and Strict Offline Speech preferences are persisted. Reader the
 
 If service-side speech generation fails, the player reports the error and offers a route back to the document. The reader can retry from the last saved position. The failure status is process-local; the durable document position remains in Room.
 
-System TTS voice changes, synthesis, and cache eviction are serialized across the app's generator instances to protect their shared cache directory.
+System TTS voice changes, synthesis, and cache eviction are serialized across the app's generator instances. Synthesized PCM WAV segments are stored unencrypted in app-private `cacheDir/read-aloud`, indexed durably in Room (`tts_cache_entries`) so cached speech survives service restarts, and measured directly from RIFF/WAVE PCM headers (`sampleRate`, `channels`, `bitsPerSample`, and `data` chunk byte length) rather than assuming a fixed sample rate.
 
-Service restoration ignores unfinished Read Aloud start markers and keeps restored queues paused. If a cached segment cannot play, the service preserves its source offset and reports a retry path back to the reader. The user must resume or retry explicitly.
+Read Aloud queue items use a single canonical percent-encoded media-ID format (`ReadAloudMediaId`) so arbitrary characters (such as `|` or `%`) in document IDs, cache keys, or voice metadata never shift fields. Service restoration ignores unfinished Read Aloud start markers and keeps restored queues paused. If a cached segment cannot play, the service preserves its source offset and reports a retry path back to the reader. The user must resume or retry explicitly.
 
 ## Large Documents
 

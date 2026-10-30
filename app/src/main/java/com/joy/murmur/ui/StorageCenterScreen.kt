@@ -94,28 +94,41 @@ fun StorageCenterScreen(playbackInUse: Boolean) {
         }
     }
 
+    var confirmClearCache by remember { mutableStateOf(false) }
+
     Column(
         modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
         Text("Storage", style = MaterialTheme.typography.headlineMedium)
         Text(
-            "Storage usage is read-only. Your music, audiobooks, documents, and generated files are not changed here.",
+            "Your original music, audiobooks, and documents are never modified or deleted by Murmur. You can safely clear generated Read Aloud speech cache below.",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         usage?.let { current ->
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("App storage", style = MaterialTheme.typography.titleMedium)
-                    StorageRow("Read Aloud cache", current.ttsCacheBytes)
-                    StorageRow("Neural voice assets", current.neuralVoicesBytes)
-                    StorageRow("Generated exports", current.exportsBytes)
+                    Text("App-private storage", style = MaterialTheme.typography.titleMedium)
+                    StorageRow("Read Aloud cache (local WAV)", current.ttsCacheBytes)
                     StorageRow("Database and SQLite journal", current.databaseBytes)
                     StorageRow("Temporary files", current.tempBytes)
                     HorizontalDivider()
-                    StorageRow("Total", current.totalBytes, bold = true)
-                    StorageRow("Available", current.availableBytes, bold = true)
+                    StorageRow("Total app storage", current.totalBytes, bold = true)
+                    StorageRow("Device available", current.availableBytes, bold = true)
+                    Text(
+                        "Synthesized Read Aloud WAV audio is stored unencrypted in Murmur's private app cache directory (cacheDir/read-aloud) and never leaves this device.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    if (current.ttsCacheBytes + current.tempBytes > 0L) {
+                        TextButton(
+                            enabled = !loading,
+                            onClick = { confirmClearCache = true },
+                        ) {
+                            Text("Clear Read Aloud cache…")
+                        }
+                    }
                 }
             }
         }
@@ -174,6 +187,35 @@ fun StorageCenterScreen(playbackInUse: Boolean) {
                 }) { Text("Replace data") }
             },
             dismissButton = { TextButton(onClick = { confirmRestore = false }) { Text("Cancel") } },
+        )
+    }
+
+    if (confirmClearCache) {
+        AlertDialog(
+            onDismissRequest = { confirmClearCache = false },
+            title = { Text("Clear Read Aloud cache?") },
+            text = {
+                Text("This deletes temporary and cached Read Aloud speech audio that is not in the current queue. Your original music, audiobooks, documents, bookmarks, and reading positions are preserved.")
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmClearCache = false
+                    scope.launch {
+                        loading = true
+                        error = null
+                        try {
+                            val reclaimed = storageCenter.clearGeneratedSpeechCache()
+                            message = "Cleared ${formatBytes(reclaimed)} of cached Read Aloud audio."
+                            refresh()
+                        } catch (_: Exception) {
+                            error = "Could not clear cached Read Aloud audio."
+                        } finally {
+                            loading = false
+                        }
+                    }
+                }) { Text("Clear cache") }
+            },
+            dismissButton = { TextButton(onClick = { confirmClearCache = false }) { Text("Cancel") } },
         )
     }
 }

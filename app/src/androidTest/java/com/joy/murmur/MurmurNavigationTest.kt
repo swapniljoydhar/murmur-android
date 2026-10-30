@@ -70,9 +70,6 @@ class MurmurNavigationTest {
         override suspend fun setReaderTextScale(scale: Float) = Unit
         override suspend fun setBackgroundMusicRefresh(enabled: Boolean) = Unit
         override suspend fun setSelectedSpeechVoice(voiceName: String?) = Unit
-        override suspend fun setSelectedNeuralVoice(voiceId: String?) = Unit
-        override suspend fun setNeuralTtsSpeed(speed: Float) = Unit
-        override suspend fun setOutputProfiles(json: String) = Unit
         override suspend fun checkVoiceEligibility(voiceName: String?) = VoiceNetworkRequirement.UNKNOWN
         override suspend fun getAvailableVoices(): List<SpeechVoiceOption> = emptyList()
     }

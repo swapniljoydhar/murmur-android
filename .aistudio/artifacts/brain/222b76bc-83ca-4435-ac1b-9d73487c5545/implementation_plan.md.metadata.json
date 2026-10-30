@@ -1,0 +1,6 @@
+{
+  "summary":  "Comprehensive architectural and UX overhaul plan for Murmur covering dead TTS/DSP cleanup, unified Read Aloud media IDs, Room-persisted TTS cache metadata, warm editorial Home screen redesign, persistent Material 3 Mini-Player with skip controls, DocumentFile file/folder picker, MediaStyle session notification with app deep-link, custom ExoPlayer seek bar, and offline security/legal hardening.",
+  "updatedAt":  "2026-10-30T08:41:47.124217787Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}

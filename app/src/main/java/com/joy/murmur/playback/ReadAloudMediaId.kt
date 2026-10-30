@@ -1,15 +1,15 @@
 package com.joy.murmur.playback
 
 import android.net.Uri
-import com.joy.murmur.domain.documents.DocumentStructure
+import java.net.URLDecoder
+import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 
 /**
- * Media ID format for Read Aloud segments.
- * Includes full structural identity for sentence-level synchronization and cache keys.
- *
- * Format: read_aloud|documentId|pageStart|pageLength|continuous|sourceOffset|cacheKey|sectionId|paragraphId|sentenceRangeStart|sentenceRangeEnd|textHash|engine|voice|locale
+ * Canonical Media ID codec for Read Aloud segments and start markers.
+ * Every string field is UTF-8 percent-encoded so pipe delimiters (`|`), percent signs (`%`),
+ * spaces, and Unicode characters never shift downstream fields.
  */
 data class ReadAloudSegmentInfo(
     val documentId: String,
@@ -18,20 +18,32 @@ data class ReadAloudSegmentInfo(
     val continuous: Boolean,
     val sourceOffset: Long,
     val cacheKey: String,
-    // Structural identity fields for sentence synchronization
     val sectionId: String? = null,
     val paragraphId: String? = null,
     val sentenceRangeStart: String? = null,
     val sentenceRangeEnd: String? = null,
     val textHash: String? = null,
-    // Synthesis identity fields
-    val engine: String? = null,
+    val engine: String? = "android_tts",
     val voice: String? = null,
     val locale: String? = null,
-    // Document fingerprint for cache invalidation
     val documentFingerprint: String? = null,
     val parseVersion: Int = 1,
 )
+
+data class ReadAloudStartInfo(
+    val documentId: String,
+    val startChar: Long,
+    val mimeType: String,
+    val strictOffline: Boolean,
+    val continuous: Boolean,
+)
+
+internal fun encodeMediaIdField(value: String): String =
+    URLEncoder.encode(value, StandardCharsets.UTF_8.name()).replace("+", "%20")
+
+internal fun decodeMediaIdField(encoded: String): String? = runCatching {
+    URLDecoder.decode(encoded.replace("+", "%2B"), StandardCharsets.UTF_8.name())
+}.getOrNull()
 
 fun readAloudMediaId(
     documentId: String,
@@ -45,35 +57,35 @@ fun readAloudMediaId(
     sentenceRangeStart: String? = null,
     sentenceRangeEnd: String? = null,
     textHash: String? = null,
-    engine: String? = null,
+    engine: String? = "android_tts",
     voice: String? = null,
     locale: String? = null,
     documentFingerprint: String? = null,
     parseVersion: Int = 1,
 ): String = listOf(
     "read_aloud",
-    Uri.encode(documentId),
+    encodeMediaIdField(documentId),
     pageStart.toString(),
     pageLength.toString(),
     if (continuous) "continuous" else "page",
     sourceOffset.toString(),
-    cacheKey,
-    sectionId.orEmpty(),
-    paragraphId.orEmpty(),
-    sentenceRangeStart.orEmpty(),
-    sentenceRangeEnd.orEmpty(),
-    textHash.orEmpty(),
-    engine.orEmpty(),
-    voice.orEmpty(),
-    locale.orEmpty(),
-    documentFingerprint.orEmpty(),
+    encodeMediaIdField(cacheKey),
+    encodeMediaIdField(sectionId.orEmpty()),
+    encodeMediaIdField(paragraphId.orEmpty()),
+    encodeMediaIdField(sentenceRangeStart.orEmpty()),
+    encodeMediaIdField(sentenceRangeEnd.orEmpty()),
+    encodeMediaIdField(textHash.orEmpty()),
+    encodeMediaIdField(engine ?: "android_tts"),
+    encodeMediaIdField(voice.orEmpty()),
+    encodeMediaIdField(locale.orEmpty()),
+    encodeMediaIdField(documentFingerprint.orEmpty()),
     parseVersion.toString(),
 ).joinToString("|")
 
 fun parseReadAloudMediaId(mediaId: String): ReadAloudSegmentInfo? {
-    val fields = mediaId.split('|', limit = 18)
-    val isNeural = fields.firstOrNull() == "neural_read_aloud_start"
-    if (fields.size < 7 || (fields[0] != "read_aloud" && !isNeural)) return null
+    val fields = mediaId.split('|')
+    if (fields.size !in 7..17 || fields[0] != "read_aloud") return null
+    val documentId = decodeMediaIdField(fields[1])?.takeIf(String::isNotBlank) ?: return null
     val pageStart = fields[2].toLongOrNull() ?: return null
     val pageLength = fields[3].toIntOrNull()?.takeIf { it >= 0 } ?: return null
     val continuous = when (fields[4]) {
@@ -83,19 +95,13 @@ fun parseReadAloudMediaId(mediaId: String): ReadAloudSegmentInfo? {
     }
     val sourceOffset = fields[5].toLongOrNull() ?: return null
     if (!isValidReadAloudSourceRange(pageStart, pageLength, sourceOffset)) return null
-    val cacheKey = fields[6]
-    val sectionId = fields.getOrNull(7)?.takeIf { it.isNotBlank() }
-    val paragraphId = fields.getOrNull(8)?.takeIf { it.isNotBlank() }
-    val sentenceRangeStart = fields.getOrNull(9)?.takeIf { it.isNotBlank() }
-    val sentenceRangeEnd = fields.getOrNull(10)?.takeIf { it.isNotBlank() }
-    val textHash = fields.getOrNull(11)?.takeIf { it.isNotBlank() }
-    val engine = fields.getOrNull(12)?.takeIf { it.isNotBlank() }
-    val voice = fields.getOrNull(13)?.takeIf { it.isNotBlank() }
-    val locale = fields.getOrNull(14)?.takeIf { it.isNotBlank() }
-    val documentFingerprint = fields.getOrNull(15)?.takeIf { it.isNotBlank() }
-    val parseVersion = fields.getOrNull(16)?.toIntOrNull() ?: 1
+    val cacheKey = decodeMediaIdField(fields[6]) ?: return null
 
-    val documentId = Uri.decode(fields[1]).takeIf(String::isNotBlank) ?: return null
+    fun optionalDecoded(index: Int): String? =
+        fields.getOrNull(index)?.takeIf { it.isNotEmpty() }?.let(::decodeMediaIdField)?.takeIf { it.isNotBlank() }
+
+    val parseVersion = fields.getOrNull(16)?.let { it.toIntOrNull() ?: return null } ?: 1
+
     return ReadAloudSegmentInfo(
         documentId = documentId,
         pageStart = pageStart,
@@ -103,16 +109,56 @@ fun parseReadAloudMediaId(mediaId: String): ReadAloudSegmentInfo? {
         continuous = continuous,
         sourceOffset = sourceOffset,
         cacheKey = cacheKey,
-        sectionId = sectionId,
-        paragraphId = paragraphId,
-        sentenceRangeStart = sentenceRangeStart,
-        sentenceRangeEnd = sentenceRangeEnd,
-        textHash = textHash,
-        engine = engine?.takeIf { isNeural } ?: "android_tts",
-        voice = voice,
-        locale = locale,
-        documentFingerprint = documentFingerprint,
+        sectionId = optionalDecoded(7),
+        paragraphId = optionalDecoded(8),
+        sentenceRangeStart = optionalDecoded(9),
+        sentenceRangeEnd = optionalDecoded(10),
+        textHash = optionalDecoded(11),
+        engine = optionalDecoded(12) ?: "android_tts",
+        voice = optionalDecoded(13),
+        locale = optionalDecoded(14),
+        documentFingerprint = optionalDecoded(15),
         parseVersion = parseVersion,
+    )
+}
+
+fun readAloudStartMediaId(
+    documentId: String,
+    startChar: Long,
+    mimeType: String,
+    strictOffline: Boolean,
+    continuous: Boolean,
+): String = listOf(
+    "read_aloud_start",
+    encodeMediaIdField(documentId),
+    startChar.coerceAtLeast(0L).toString(),
+    encodeMediaIdField(mimeType),
+    strictOffline.toString(),
+    if (continuous) "continuous" else "page",
+).joinToString("|")
+
+fun parseReadAloudStartMediaId(mediaId: String): ReadAloudStartInfo? {
+    val fields = mediaId.split('|')
+    if (fields.size != 6 || fields[0] != "read_aloud_start") return null
+    val documentId = decodeMediaIdField(fields[1])?.takeIf(String::isNotBlank) ?: return null
+    val startChar = fields[2].toLongOrNull()?.takeIf { it >= 0L } ?: return null
+    val mimeType = decodeMediaIdField(fields[3])?.takeIf(String::isNotBlank) ?: return null
+    val strictOffline = when (fields[4]) {
+        "true" -> true
+        "false" -> false
+        else -> return null
+    }
+    val continuous = when (fields[5]) {
+        "continuous" -> true
+        "page" -> false
+        else -> return null
+    }
+    return ReadAloudStartInfo(
+        documentId = documentId,
+        startChar = startChar,
+        mimeType = mimeType,
+        strictOffline = strictOffline,
+        continuous = continuous,
     )
 }
 
@@ -123,62 +169,10 @@ internal fun isValidReadAloudSourceRange(pageStart: Long, pageLength: Int, sourc
         pageStart <= Long.MAX_VALUE - pageLength &&
         sourceOffset in 0L..pageLength.toLong()
 
-/**
- * Creates a cache identity string from synthesis parameters.
- * This should match the cache key used in SystemTtsSpeechGenerator.
- */
-fun createCacheIdentity(
-    documentId: String,
-    documentFingerprint: String,
-    parseVersion: Int,
-    sectionId: String?,
-    paragraphId: String?,
-    sentenceRangeStart: String?,
-    sentenceRangeEnd: String?,
-    textHash: String?,
-    engine: String,
-    engineVersion: String,
-    voice: String,
-    locale: String,
-    pronunciationVersion: String,
-    filterVersion: String,
-    sampleRate: Int,
-    channelCount: Int,
-    bitDepth: Int,
-): String {
-    return listOf(
-        documentId,
-        documentFingerprint,
-        parseVersion.toString(),
-        sectionId.orEmpty(),
-        paragraphId.orEmpty(),
-        sentenceRangeStart.orEmpty(),
-        sentenceRangeEnd.orEmpty(),
-        textHash.orEmpty(),
-        engine,
-        engineVersion,
-        voice,
-        locale,
-        pronunciationVersion,
-        filterVersion,
-        sampleRate.toString(),
-        channelCount.toString(),
-        bitDepth.toString(),
-    ).joinToString("|")
-}
-
-/**
- * Markdown to speech text conversion with offset mapping.
- * Returns the cleaned text and a mapping from speech text offsets to source markdown offsets.
- */
 fun markdownForSpeech(source: String): String = ReadAloudUtils.markdownForSpeech(source)
 
-/**
- * Generates a document fingerprint from the source URI and metadata.
- * Used for cache invalidation when document changes.
- */
 fun generateDocumentFingerprint(uri: Uri, lastModified: Long, size: Long): String {
-    val input = "${uri.toString()}|$lastModified|$size"
+    val input = "${uri}|$lastModified|$size"
     return MessageDigest.getInstance("SHA-256")
         .digest(input.toByteArray(StandardCharsets.UTF_8))
         .joinToString("") { "%02x".format(it.toInt() and 0xFF) }.take(16)

@@ -30,6 +30,9 @@ interface MusicLibraryRepository {
 
     /** Refreshes or removes one changed MediaStore row in the local catalog. */
     suspend fun refreshChangedItem(mediaStoreId: Long)
+
+    /** Imports user-selected SAF audio files or folder contents into the local music catalog without requiring broad MediaStore permission. */
+    suspend fun importAudioUris(uris: List<Uri>, folderLabel: String? = null): Int = 0
 }
 
 data class MusicLibrarySnapshot(

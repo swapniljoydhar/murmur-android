@@ -100,17 +100,6 @@ data class AudiobookChapterEntity(
     @ColumnInfo(defaultValue = "'UNKNOWN'") val source: String = "UNKNOWN",
 )
 
-@Entity(tableName = "processor_settings")
-data class ProcessorSettingsEntity(
-    @PrimaryKey val id: Int = 0,
-    val replayGainEnabled: Boolean = false,
-    val equalizerEnabled: Boolean = false,
-    val crossfeedEnabled: Boolean = false,
-    val headroomEnabled: Boolean = false,
-    val balanceEnabled: Boolean = false,
-    val ditherEnabled: Boolean = false,
-    val updatedAtMillis: Long = System.currentTimeMillis(),
-)
 
 data class AudiobookWithProgress(
     @Embedded val audiobook: AudiobookEntity,
@@ -217,48 +206,6 @@ data class DocumentStructureEntity(
 )
 
 
-@Entity(tableName = "batch_jobs")
-data class BatchJobEntity(
-    @PrimaryKey val id: String,
-    val documentId: String,
-    val status: Int, // JobStatus enum ordinal
-    val totalChapters: Int,
-    val completedChapters: Int,
-    val currentChapter: Int?,
-    val outputUri: String?,
-    val voiceId: String,
-    val voiceSpeed: Float,
-    val mergeOutput: Boolean,
-    val createdAtMillis: Long,
-    val updatedAtMillis: Long,
-    val error: String?,
-)
-
-@Entity(
-    tableName = "batch_work_units",
-    foreignKeys = [ForeignKey(
-        entity = BatchJobEntity::class,
-        parentColumns = ["id"],
-        childColumns = ["jobId"],
-        onDelete = ForeignKey.CASCADE,
-    )],
-    indices = [Index("jobId"), Index("jobId", "status")],
-)
-data class BatchWorkUnitEntity(
-    @PrimaryKey val id: String,
-    val jobId: String,
-    val chapterIndex: Int,
-    val sectionId: String,
-    val startChar: Long,
-    val endChar: Long,
-    val text: String,
-    val status: Int, // WorkUnitStatus enum ordinal
-    val outputFile: String?,
-    val retryCount: Int,
-    val createdAtMillis: Long,
-    val updatedAtMillis: Long,
-)
-
 @Entity(
     tableName = "read_aloud_segment_map",
     primaryKeys = ["documentId", "sourceOffset"],
@@ -274,24 +221,20 @@ data class ReadAloudSegmentMapEntity(
     val segmentDurationMs: Long,
 )
 
-enum class BatchJobStatus(val value: Int) {
-    PENDING(0),
-    RUNNING(1),
-    PAUSED(2),
-    INTERRUPTED(3),
-    COMPLETED(4),
-    CANCELLED(5),
-    FAILED(6),
-    NEEDS_ATTENTION(7),
-}
+@Entity(tableName = "tts_cache_entries")
+data class TtsCacheEntryEntity(
+    @PrimaryKey val cacheKey: String,
+    val filePath: String,
+    val identity: String,
+    val sampleRate: Int,
+    val channelCount: Int,
+    val bitsPerSample: Int,
+    val durationMs: Long,
+    val sizeBytes: Long,
+    val createdAtMillis: Long,
+    val lastAccessedMillis: Long,
+)
 
-enum class BatchWorkUnitStatus(val value: Int) {
-    PENDING(0),
-    GENERATING(1),
-    COMPLETED(2),
-    FAILED(3),
-    CANCELLED(4),
-}
 
 
 @Dao
@@ -374,7 +317,7 @@ interface PlaybackDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertMusicTracks(items: List<MusicTrackEntity>)
 
-    @Query("DELETE FROM music_catalog WHERE syncToken != :syncToken")
+    @Query("DELETE FROM music_catalog WHERE syncToken != :syncToken AND syncToken != 'saf-import'")
     suspend fun deleteMusicTracksExcept(syncToken: String)
 
     @Query("DELETE FROM music_catalog")
@@ -494,37 +437,6 @@ interface PlaybackDao {
     @Query("SELECT * FROM document_structures WHERE documentId = :documentId")
     fun observeDocumentStructure(documentId: String): Flow<DocumentStructureEntity?>
     
-    // Batch TTS methods
-    @Query("SELECT * FROM batch_jobs ORDER BY createdAtMillis DESC")
-    fun observeBatchJobs(): Flow<List<BatchJobEntity>>
-
-    @Query("SELECT * FROM batch_jobs WHERE id = :jobId")
-    suspend fun getBatchJob(jobId: String): BatchJobEntity?
-
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertBatchJob(job: BatchJobEntity)
-
-    @Query("UPDATE batch_jobs SET status = :status, completedChapters = :completedChapters, currentChapter = :currentChapter, outputUri = :outputUri, updatedAtMillis = :updatedAtMillis, error = :error WHERE id = :jobId")
-    suspend fun updateBatchJob(jobId: String, status: Int, completedChapters: Int, currentChapter: Int?, outputUri: String?, updatedAtMillis: Long, error: String?)
-
-    @Query("DELETE FROM batch_jobs WHERE id = :jobId")
-    suspend fun deleteBatchJob(jobId: String)
-
-    @Query("SELECT * FROM batch_work_units WHERE jobId = :jobId ORDER BY chapterIndex, startChar")
-    suspend fun getBatchWorkUnits(jobId: String): List<BatchWorkUnitEntity>
-
-    @Query("SELECT * FROM batch_work_units WHERE jobId = :jobId AND status = :status")
-    suspend fun getBatchWorkUnitsByStatus(jobId: String, status: Int): List<BatchWorkUnitEntity>
-
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertBatchWorkUnits(units: List<BatchWorkUnitEntity>)
-
-    @Query("UPDATE batch_work_units SET status = :status, outputFile = :outputFile, retryCount = :retryCount, updatedAtMillis = :updatedAtMillis WHERE id = :unitId")
-    suspend fun updateBatchWorkUnit(unitId: String, status: Int, outputFile: String?, retryCount: Int, updatedAtMillis: Long)
-
-    @Query("DELETE FROM batch_work_units WHERE jobId = :jobId")
-    suspend fun deleteBatchWorkUnits(jobId: String)
-
     // Read Aloud segment map methods
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertSegmentMap(entity: ReadAloudSegmentMapEntity)
@@ -541,17 +453,45 @@ interface PlaybackDao {
     @Query("DELETE FROM read_aloud_segment_map WHERE documentId = :documentId")
     suspend fun deleteSegmentMapsForDocument(documentId: String)
 
-    // Processor settings
-    @Query("SELECT * FROM processor_settings WHERE id = 0")
-    suspend fun getProcessorSettings(): ProcessorSettingsEntity?
+    // Persisted TTS cache index methods
+    @Query("SELECT * FROM tts_cache_entries WHERE cacheKey = :cacheKey")
+    suspend fun getTtsCacheEntry(cacheKey: String): TtsCacheEntryEntity?
+
+    @Query("SELECT * FROM tts_cache_entries ORDER BY lastAccessedMillis ASC")
+    suspend fun getAllTtsCacheEntries(): List<TtsCacheEntryEntity>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun saveProcessorSettings(settings: ProcessorSettingsEntity)
+    suspend fun upsertTtsCacheEntry(entry: TtsCacheEntryEntity)
+
+    @Query("UPDATE tts_cache_entries SET lastAccessedMillis = :lastAccessedMillis WHERE cacheKey = :cacheKey")
+    suspend fun touchTtsCacheEntry(cacheKey: String, lastAccessedMillis: Long)
+
+    @Query("DELETE FROM tts_cache_entries WHERE cacheKey = :cacheKey")
+    suspend fun deleteTtsCacheEntry(cacheKey: String)
+
+    @Query("DELETE FROM tts_cache_entries")
+    suspend fun clearAllTtsCacheEntries()
 }
 
 @Database(
-    entities = [QueueItemEntity::class, PlaybackStateEntity::class, ListeningProgressEntity::class, AudiobookEntity::class, AudiobookBookmarkEntity::class, AudiobookChapterEntity::class, MusicTrackEntity::class, MusicCatalogStateEntity::class, MusicPlaylistEntity::class, MusicPlaylistTrackEntity::class, ReaderDocumentEntity::class, ReaderBookmarkEntity::class, DocumentStructureEntity::class, BatchJobEntity::class, BatchWorkUnitEntity::class, ReadAloudSegmentMapEntity::class, ProcessorSettingsEntity::class],
-    version = 16,
+    entities = [
+        QueueItemEntity::class,
+        PlaybackStateEntity::class,
+        ListeningProgressEntity::class,
+        AudiobookEntity::class,
+        AudiobookBookmarkEntity::class,
+        AudiobookChapterEntity::class,
+        MusicTrackEntity::class,
+        MusicCatalogStateEntity::class,
+        MusicPlaylistEntity::class,
+        MusicPlaylistTrackEntity::class,
+        ReaderDocumentEntity::class,
+        ReaderBookmarkEntity::class,
+        DocumentStructureEntity::class,
+        ReadAloudSegmentMapEntity::class,
+        TtsCacheEntryEntity::class,
+    ],
+    version = 17,
     exportSchema = true,
 )
 abstract class PlaybackDatabase : RoomDatabase() {
@@ -566,7 +506,24 @@ abstract class PlaybackDatabase : RoomDatabase() {
                 context.applicationContext,
                 PlaybackDatabase::class.java,
                 "murmur.db",
-            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16).build().also { instance = it }
+            ).addMigrations(
+                MIGRATION_1_2,
+                MIGRATION_2_3,
+                MIGRATION_3_4,
+                MIGRATION_4_5,
+                MIGRATION_5_6,
+                MIGRATION_6_7,
+                MIGRATION_7_8,
+                MIGRATION_8_9,
+                MIGRATION_9_10,
+                MIGRATION_10_11,
+                MIGRATION_11_12,
+                MIGRATION_12_13,
+                MIGRATION_13_14,
+                MIGRATION_14_15,
+                MIGRATION_15_16,
+                MIGRATION_16_17,
+            ).build().also { instance = it }
         }
 
         private val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -682,6 +639,29 @@ abstract class PlaybackDatabase : RoomDatabase() {
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_read_aloud_segment_map_documentId ON read_aloud_segment_map(documentId)")
             }
         }
+
+        internal val MIGRATION_16_17 = object : Migration(16, 17) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                db.execSQL("DROP TABLE IF EXISTS batch_work_units")
+                db.execSQL("DROP TABLE IF EXISTS batch_jobs")
+                db.execSQL("DROP TABLE IF EXISTS processor_settings")
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS tts_cache_entries (
+                        cacheKey TEXT NOT NULL,
+                        filePath TEXT NOT NULL,
+                        identity TEXT NOT NULL,
+                        sampleRate INTEGER NOT NULL,
+                        channelCount INTEGER NOT NULL,
+                        bitsPerSample INTEGER NOT NULL,
+                        durationMs INTEGER NOT NULL,
+                        sizeBytes INTEGER NOT NULL,
+                        createdAtMillis INTEGER NOT NULL,
+                        lastAccessedMillis INTEGER NOT NULL,
+                        PRIMARY KEY(cacheKey)
+                    )
+                """)
+            }
+        }
     }
 }
 
@@ -703,7 +683,7 @@ class PlaybackStore(private val database: PlaybackDatabase) {
 
     suspend fun getCurrentContentType(): PlaybackContentType =
         dao.getCurrentPlayback()?.let {
-            PlaybackContentType.valueOf(it.contentType.uppercase())
+            PlaybackContentType.entries.firstOrNull { type -> type.storageValue.equals(it.contentType, ignoreCase = true) || type.name.equals(it.contentType, ignoreCase = true) }
         } ?: PlaybackContentType.MUSIC
 
     suspend fun replaceQueue(items: List<QueueItemEntity>) {
@@ -713,8 +693,8 @@ class PlaybackStore(private val database: PlaybackDatabase) {
         }
     }
 
-    suspend fun saveState(mediaId: String?, positionMs: Long) {
-        dao.saveState(PlaybackStateEntity(currentMediaId = mediaId, positionMs = positionMs.coerceAtLeast(0L)))
+    suspend fun saveState(mediaId: String?, positionMs: Long, isPlaying: Boolean = false) {
+        dao.saveState(PlaybackStateEntity(currentMediaId = mediaId, positionMs = positionMs.coerceAtLeast(0L), isPlaying = isPlaying))
     }
 
     suspend fun getProgress(mediaId: String): ListeningProgressEntity? = dao.getListeningProgress(mediaId)
@@ -723,13 +703,11 @@ class PlaybackStore(private val database: PlaybackDatabase) {
 
     fun observeAudiobookProgress(): Flow<List<ListeningProgressEntity>> = dao.observeInProgressAudiobooks()
 
-    suspend fun getProcessorSettings(): ProcessorSettingsEntity? = dao.getProcessorSettings()
-
-    suspend fun persistSnapshot(queue: List<QueueItemEntity>, mediaId: String?, positionMs: Long, durationMs: Long) {
+    suspend fun persistSnapshot(queue: List<QueueItemEntity>, mediaId: String?, positionMs: Long, durationMs: Long, isPlaying: Boolean = false) {
         database.withTransaction {
             dao.clearQueue()
             dao.insertQueue(queue)
-            dao.saveState(PlaybackStateEntity(currentMediaId = mediaId, positionMs = positionMs.coerceAtLeast(0L)))
+            dao.saveState(PlaybackStateEntity(currentMediaId = mediaId, positionMs = positionMs.coerceAtLeast(0L), isPlaying = isPlaying))
             val current = queue.firstOrNull { it.mediaId == mediaId }
             if (current != null) {
                 val position = positionMs.coerceAtLeast(0L)
@@ -787,12 +765,18 @@ class MusicCatalogStore(private val database: PlaybackDatabase) {
 
     suspend fun replaceSnapshot(items: List<MusicTrackEntity>, syncToken: String) {
         database.withTransaction {
-            if (items.isEmpty()) {
-                dao.clearMusicCatalog()
-            } else {
+            if (items.isNotEmpty()) {
                 dao.upsertMusicTracks(items)
-                dao.deleteMusicTracksExcept(syncToken)
             }
+            dao.deleteMusicTracksExcept(syncToken)
+            dao.saveMusicCatalogState(MusicCatalogStateEntity(hasScanned = true))
+        }
+    }
+
+    suspend fun importSafTracks(items: List<MusicTrackEntity>) {
+        if (items.isEmpty()) return
+        database.withTransaction {
+            dao.upsertMusicTracks(items)
             dao.saveMusicCatalogState(MusicCatalogStateEntity(hasScanned = true))
         }
     }

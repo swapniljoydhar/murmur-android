@@ -45,7 +45,7 @@ internal object EpubParser {
             require(name.length <= MAX_ENTRY_NAME_LENGTH) { "EPUB archive entry name is too long." }
             val isMetadata = name == "META-INF/container.xml" || name.endsWith(".opf", ignoreCase = true)
             val isChapter = name.endsWith(".xhtml", ignoreCase = true) || name.endsWith(".html", ignoreCase = true) || name.endsWith(".htm", ignoreCase = true)
-            val isToc = name.endsWith("toc.ncx", ignoreCase = true) || name.endsWith("nav.xhtml", ignoreCase = true) || name.contains("toc", ignoreCase = true)
+            val isToc = isTocEntryName(name)
             val captureLimit = when {
                 isMetadata -> MAX_METADATA_BYTES.toLong()
                 isChapter -> MAX_CHAPTER_BYTES
@@ -78,6 +78,12 @@ internal object EpubParser {
             zip.closeEntry()
         }
         return entries
+    }
+
+    internal fun isTocEntryName(entryName: String): Boolean {
+        val baseName = entryName.substringAfterLast('/').lowercase()
+        return baseName.endsWith(".ncx") ||
+            baseName in setOf("toc.xhtml", "toc.html", "toc.htm", "nav.xhtml", "nav.html", "nav.htm")
     }
 
     fun parseXml(bytes: ByteArray): Document {
@@ -121,8 +127,11 @@ internal object EpubParser {
     fun parseToc(entries: Map<String, ByteArray>, packagePath: String): List<TocEntry> {
         val tocEntries = mutableListOf<TocEntry>()
 
-        // Try EPUB 3 nav.xhtml first
-        val navPath = entries.keys.firstOrNull { it.endsWith("nav.xhtml", ignoreCase = true) }
+        // Try EPUB 3 navigation document first
+        val navPath = entries.keys.firstOrNull {
+            val base = it.substringAfterLast('/').lowercase()
+            base == "nav.xhtml" || base == "nav.html" || base == "nav.htm"
+        }
         if (navPath != null) {
             val navXml = entries[navPath]
             if (navXml != null) {
@@ -132,7 +141,7 @@ internal object EpubParser {
         }
 
         // Fallback to EPUB 2 NCX
-        val ncxPath = entries.keys.firstOrNull { it.endsWith("toc.ncx", ignoreCase = true) }
+        val ncxPath = entries.keys.firstOrNull { it.substringAfterLast('/').endsWith(".ncx", ignoreCase = true) }
         if (ncxPath != null) {
             val ncxXml = entries[ncxPath]
             if (ncxXml != null) {

@@ -53,7 +53,7 @@ class StorageCenterBackupTest {
             val dao = database.playbackDao()
             dao.insertMusicPlaylist(MusicPlaylistEntity("source", "Source", 1L))
             val storage = StorageCenter(context, database)
-            val original = MurmurBackupFormat.decode(storage.createBackupBytes(), expectedDatabaseVersion = 15).content
+            val original = MurmurBackupFormat.decode(storage.createBackupBytes(), expectedDatabaseVersion = 17).content
             val playlistTable = original.tables.getValue("music_playlists")
             val invalidContent = original.copy(tables = original.tables + ("music_playlists" to playlistTable.copy(rows = playlistTable.rows + playlistTable.rows)))
             val invalidBackup = MurmurBackupFormat.encode(invalidContent)

@@ -86,7 +86,14 @@ class SystemTtsSpeechGenerator(context: Context) {
 
     private val appContext = context.applicationContext
     private val outputDirectory = File(appContext.cacheDir, "read-aloud").apply { mkdirs() }
-    private val playbackStore = PlaybackStore(PlaybackDatabase.getInstance(appContext))
+    private val database = PlaybackDatabase.getInstance(appContext)
+    private val playbackStore = PlaybackStore(database)
+    private val ttsCache = TtsCache(
+        cacheDir = outputDirectory,
+        maxSizeBytes = SPEECH_CACHE_MAX_BYTES,
+        maxAgeMillis = SPEECH_CACHE_MAX_AGE_MILLIS,
+        dao = database.playbackDao(),
+    )
     private val ready = CompletableDeferred<Unit>()
     private val captures = ConcurrentHashMap<String, Capture>()
     private val synthesisMutex = processSynthesisMutex
@@ -192,10 +199,19 @@ class SystemTtsSpeechGenerator(context: Context) {
         }
     }
 
-    fun currentIdentity(): String {
-        return listOf(engine.defaultEngine.orEmpty(), engine.voice?.name.orEmpty(), engine.voice?.locale?.toLanguageTag().orEmpty())
-            .joinToString("|")
-    }
+    fun currentSynthesisIdentity(filterVersion: String = "1"): SynthesisIdentity = SynthesisIdentity(
+        engine = engine.defaultEngine.orEmpty().ifBlank { "android_tts" },
+        engineVersion = "1",
+        voice = engine.voice?.name.orEmpty(),
+        locale = engine.voice?.locale?.toLanguageTag().orEmpty(),
+        pronunciationVersion = "1",
+        filterVersion = filterVersion,
+        sampleRate = 0,
+        channelCount = 0,
+        bitDepth = 0,
+    )
+
+    fun currentIdentity(): String = currentSynthesisIdentity().toString()
 
     suspend fun synthesize(
         text: String,
@@ -212,26 +228,43 @@ class SystemTtsSpeechGenerator(context: Context) {
         }.toSet()
         withContext(Dispatchers.IO) {
             currentCoroutineContext().ensureActive()
+            ttsCache.hydrateIfNeeded()
             evictSpeechCache(queuedKeys)
-            val voiceIdentity = listOf(engine.defaultEngine.orEmpty(), engine.voice?.name.orEmpty(), engine.voice?.locale?.toLanguageTag().orEmpty())
-                .joinToString("|")
+            val voiceIdentity = currentSynthesisIdentity().toString()
             splitSpeechText(text, (TextToSpeech.getMaxSpeechInputLength() - 128).coerceAtLeast(256)).mapIndexed { index, chunk ->
                 currentCoroutineContext().ensureActive()
-                val digest = sha256("$identity|$voiceIdentity|${chunk.text}")
+                val canonicalKeySource = "$voiceIdentity|$identity|${chunk.text}"
+                val digest = sha256(canonicalKeySource)
                 val destination = File(outputDirectory, "$digest.wav")
-                if (destination.isFile && destination.length() > 44L) {
-                    destination.setLastModified(System.currentTimeMillis())
-                    // For cached files, estimate duration from file size
-                    val estimatedDurationMs = estimateDurationFromFile(destination)
-                    GeneratedSpeechFile(destination, index, chunk.sourceOffset, chunk.sentenceIds, chunk.sentenceStartOffsets, chunk.text.length, estimatedDurationMs)
+                val cachedHit = ttsCache.getVerifiedWave(digest, destination, voiceIdentity)
+                if (cachedHit != null) {
+                    GeneratedSpeechFile(
+                        file = cachedHit.file,
+                        segmentIndex = index,
+                        sourceOffset = chunk.sourceOffset,
+                        sentenceIds = chunk.sentenceIds,
+                        sentenceStartOffsets = chunk.sentenceStartOffsets,
+                        spokenLength = chunk.text.length,
+                        durationMs = cachedHit.header.durationMs,
+                    )
                 } else {
-                    // Check free space before synthesis
                     if (!hasFreeSpace()) {
                         throw IllegalStateException("Insufficient storage space for speech synthesis. Free up space and try again.")
                     }
-                    val durationMs = synthesizeChunk(chunk.text, destination)
+                    val synthesizedDurationMs = synthesizeChunk(chunk.text, destination)
                     destination.setLastModified(System.currentTimeMillis())
-                    GeneratedSpeechFile(destination, index, chunk.sourceOffset, chunk.sentenceIds, chunk.sentenceStartOffsets, chunk.text.length, durationMs)
+                    val wavHeader = runCatching {
+                        ttsCache.putVerifiedWave(digest, destination, voiceIdentity, queuedKeys)
+                    }.getOrNull()
+                    GeneratedSpeechFile(
+                        file = destination,
+                        segmentIndex = index,
+                        sourceOffset = chunk.sourceOffset,
+                        sentenceIds = chunk.sentenceIds,
+                        sentenceStartOffsets = chunk.sentenceStartOffsets,
+                        spokenLength = chunk.text.length,
+                        durationMs = wavHeader?.durationMs ?: synthesizedDurationMs,
+                    )
                 }
             }
         }
@@ -247,19 +280,8 @@ class SystemTtsSpeechGenerator(context: Context) {
             val availableBytes = statFs.availableBlocksLong * statFs.blockSizeLong
             return availableBytes >= 50 * 1024 * 1024L // 50 MB minimum
         } catch (_: Exception) {
-            // If we can't determine free space, allow the operation
             return true
         }
-    }
-
-    private fun estimateDurationFromFile(file: File): Long {
-        // WAV header is 44 bytes, rest is PCM data
-        val dataSize = file.length() - 44
-        if (dataSize <= 0) return 0
-        // Assume standard 22050 Hz, 1 channel, 16-bit (typical for Android TTS)
-        // This is a fallback estimate; actual duration is stored when freshly synthesized
-        val assumedByteRate = 22050 * 1 * 16 / 8 // 44100 bytes/sec
-        return (dataSize * 1000L) / assumedByteRate
     }
 
     fun shutdown() {
@@ -305,17 +327,22 @@ class SystemTtsSpeechGenerator(context: Context) {
         }
     }
 
-    private fun evictSpeechCache(protectedKeys: Set<String>) {
+    private suspend fun evictSpeechCache(protectedKeys: Set<String>) {
         val now = System.currentTimeMillis()
         val waveFiles = outputDirectory.listFiles { file -> file.isFile && file.extension == "wav" }.orEmpty()
         var totalBytes = waveFiles.sumOf(File::length)
+        val dao = database.playbackDao()
         waveFiles.sortedBy(File::lastModified).forEach { file ->
             val cacheKey = file.nameWithoutExtension
             val protected = cacheKey in protectedKeys
             val expired = now - file.lastModified() > SPEECH_CACHE_MAX_AGE_MILLIS
             if (!protected && (expired || totalBytes > SPEECH_CACHE_MAX_BYTES)) {
                 val size = file.length()
-                if (file.delete()) totalBytes -= size
+                if (file.delete()) {
+                    totalBytes -= size
+                    ttsCache.evict(cacheKey)
+                    dao.deleteTtsCacheEntry(cacheKey)
+                }
             }
         }
         outputDirectory.listFiles { file ->

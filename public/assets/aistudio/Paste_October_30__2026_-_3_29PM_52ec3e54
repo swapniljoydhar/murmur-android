@@ -1,0 +1,441 @@
+(MURMUR
+MASTER PRODUCT VISION, ENGINEERING SPECIFICATION, AND IMPLEMENTATION PLAN
+
+ROLE AND MISSION
+Act as a senior Android engineer, product designer, accessibility specialist, audio engineer, and test lead. Build
+Murmur as a complete, maintainable Android application from a brand-new project. Do not assume any existing repository,
+earlier implementation, or available project files. Make sensible decisions independently, record important trade-offs,
+and implement in verified stages rather than generating large amounts of untested code.
+
+The goal is a polished, dependable offline-first app for playing local music and audiobooks and reading local documents
+aloud. Murmur should feel like a calm, simple everyday audio app, not a technical lab, file vault, media server, or
+complicated productivity suite. Prioritize playback correctness, stability, privacy, accessibility, lower-end device
+support, and long-term maintainability over feature count.
+
+PRODUCT IDENTITY
+App name: Murmur
+Application ID / namespace: com.joy.murmur
+Platform: Android only
+Product: Local music player, audiobook player, local document reader, and text-to-speech reader
+Core promise: Play local media and read personal documents without Murmur requiring internet access.
+Create a completely fresh project; do not rely on prior code, directories, databases, builds, or files.
+
+CORE PRODUCT PRINCIPLES
+1. Offline operation is an architectural requirement, not a marketing label. Murmur must not need internet access for
+core features.
+2. No ads, analytics, telemetry, tracking, remote configuration, accounts, cloud sync, streaming services, or
+network-based discovery.
+3. Keep the main experience simple; advanced settings must not overwhelm the player or reader.
+4. Make playback dependable before adding optional features. Preserve book, playlist, queue, and reading state through
+normal process death and device restarts where Android allows.
+5. Treat long-form use as a core use case: support books/documents lasting 200–500+ hours and very large chapter,
+paragraph, or bookmark collections.
+6. Be honest about device/engine capabilities. Do not promise universal offline TTS, bit-perfect audio, or immunity to
+every OEM background restriction.
+7. Every visible action must work or clearly show why it is unavailable. Prefer a few robust, tested dependencies over a
+large stack of libraries.
+
+TECHNICAL BASELINE
+Use one Android application module unless a clear, documented engineering reason requires otherwise. Preferred stack:
+- Kotlin, Jetpack Compose, Material 3
+- AndroidX lifecycle/ViewModel, coroutines, and Flow
+- Room for structured persistence; DataStore for small preferences
+- AndroidX Media3 (ExoPlayer, MediaSession, MediaSessionService)
+- MediaStore and Storage Access Framework (SAF) for local content
+- Android platform TextToSpeech API for installed engines
+- Suitable local unit and instrumentation tests
+Use currently supported stable Android Gradle Plugin, Kotlin, Gradle, and library versions that are mutually compatible.
+Verify current versions and APIs using official documentation/release information when implementing; avoid preview,
+alpha, beta, or canary dependencies in production without a compelling reason.
+Minimum SDK: API 26 unless a specific compatibility requirement justifies a change. Set compileSdk/targetSdk to the
+current stable SDK supported by the environment. The environment may include Android 17 / API 37: verify the installed
+platform and target-SDK requirements before configuring versions, and do not lower targetSdk simply to avoid behavior
+changes. Use the installed command-line Android SDK and Gradle wrapper; do not assume Android Studio is installed or
+needed. Include reproducible commands for clean build, tests, lint, and installing/running a debug build where a device
+is available. Choose the Java/Kotlin toolchain based on official AGP requirements, preferring JDK 17 when compatible. Do
+not make network access a build-time app requirement; dependencies may need to be resolved during development, but the
+built app must not depend on online services at runtime.
+
+PROJECT STRUCTURE AND ENGINEERING QUALITY
+Separate UI, domain logic, persistence, file access, playback, TTS, and background-work coordination enough to test them
+independently. Avoid needless abstractions, frameworks within the app, circular dependencies, or overengineering.
+Suitable areas include navigation/shared UI, library discovery, playback and Media3 integration, audiobook/chapter data,
+document parsing, TTS discovery and voice eligibility, synthesis scheduling/cache, reading anchors, storage/backup,
+settings/diagnostics, and Room entities/DAOs/migrations. Use simpler boundaries when they fit better.
+Implement real behavior, not merely screens or a demo shell. Do not leave critical features as TODOs, fake buttons,
+hard-coded sample content, or placeholder repositories. Sample data belongs only in previews/tests. The shipped app must
+operate on users' selected local content. Keep UI state observable and lifecycle-aware; keep business rules out of
+composables, expose operation progress and failure states, and make cancellation/retry behavior explicit. Avoid
+introducing dependency injection or a large architecture library unless it demonstrably simplifies the code.
+
+OFFLINE AND PRIVACY CONTRACT
+Do not add Android's INTERNET permission, networking clients, network requests, ads/analytics/crash-upload SDKs,
+telemetry, remote flags, cloud accounts/sync, streaming, online catalogs, or automatic downloads of
+voices/models/artwork/metadata. Audit source manifests, build configuration, dependency manifests, and the final merged
+manifest. If a dependency adds INTERNET, remove or replace it where possible. Do not claim the app is fully offline
+until the merged-manifest audit passes.
+Core features must use local files, Android APIs, or data deliberately imported by the user. Installed third-party
+components, including a TTS engine, may have their own permissions and network behavior outside Murmur's control.
+Explain this accurately; Murmur must never deliberately send document text to a remote service or silently fall back to
+a network voice. Use MediaStore/SAF instead of broad storage access; do not request MANAGE_EXTERNAL_STORAGE for normal
+media/document access. Ask for access only when the user chooses content or a folder. Request only permissions necessary
+for a feature, explain why, and continue gracefully when permission is declined. Avoid unnecessary package visibility.
+If Android's package visibility rules require discovering TTS services, use the narrow documented query for the
+`android.intent.action.TTS_SERVICE` intent and verify it against the selected target SDK.
+Never log document text, full paths, personal filenames, media content, or similarly sensitive details by default.
+Diagnostics must remain local, helpful, and free of user content.
+
+MAIN EXPERIENCES AND DESIGN
+Provide a small, clear set of destinations, for example Home/Library, Music, Audiobooks, Read Aloud/Documents, Now
+Playing, and Settings/Storage. Music and audiobook playback should feel unified where it helps, while the reader has its
+own controls and position. Keep navigation uncluttered.
+First-run onboarding should be short. Explain how to select local media and that offline Read Aloud requires a
+compatible offline system voice or an imported local TTS model. Do not block music or document reading when TTS is
+unavailable; request permissions only when a feature needs them.
+Use Material 3 as a foundation but create a restrained, warm, audio-first identity with strong readability, sensible
+spacing, and one-handed use. Include System/Light/Dark themes, accessible contrast, useful
+empty/loading/progress/error/success states, a mini-player, a dedicated Now Playing screen, and clear distinctions
+between music, audiobooks, and spoken documents. Make current queue, current book/track/document, playback state, and
+progress understandable at a glance; avoid surprising navigation that loses context. Use confirmation for destructive
+actions but not for routine playback. Support system font scaling and accessibility services. Do not rely on color alone
+for status; avoid excessive animation, recomposition, or visual effects that hurt low-end devices. Keep internal
+concepts such as synthesis queues, model runtimes, codecs, and cache leases out of the normal user experience.
+
+LOCAL MUSIC LIBRARY
+Support common formats that the chosen Android/Media3 stack can actually decode, including MP3, M4A/AAC, FLAC, Vorbis,
+Opus, and WAV where supported. Verify actual support and disclose limitations instead of promising all formats on every
+device. Discover Android-exposed tracks through MediaStore; use SAF for files/folders not represented conveniently
+there. Persist URI permissions where permitted, and handle revoked access, provider failure, missing files, and
+unreadable content gracefully.
+Where reliably implemented, include browsing by songs, albums, artists, folders, and playlists; sort/search; queue
+editing; play/pause/next/previous/seek; shuffle/repeat; metadata and local artwork; favorites/pinning when simple;
+progress persistence; and reasonable duplicate handling. Define predictable queue insertion and next/previous behavior,
+including what happens when the current item is removed or becomes unreadable. Track scanning should be incremental and
+cancellable, avoid repeated full rescans, and keep the UI usable while metadata is inspected. Do not fetch web metadata
+or download artwork. Missing metadata must never prevent playback; use a clear fallback presentation.
+
+SHARED PLAYBACK ARCHITECTURE
+Use one coherent playback pipeline based on AndroidX Media3. Intended relationship: PlaybackCoordinator -> ExoPlayer ->
+MediaSession -> MediaSessionService. Adapt names as appropriate, but do not create competing playback engines for music,
+audiobooks, and generated TTS. A common coordinator should manage player state, queue transitions, foreground playback,
+media-session integration, notifications, and common controls; content-specific state handles chapters, bookmarks, and
+reading anchors.
+Use MediaSessionService for supported background playback and system controls. Declare correct service types and
+permissions for the selected target SDK. Verify current official Android and Media3 documentation rather than relying on
+old behavior. Notifications, lock-screen controls, Bluetooth/headset buttons, and other supported controls must reflect
+actual state. Handle audio focus, noisy-output events such as headphone removal, pause/resume semantics, and
+task/process lifecycle correctly. Do not add a service merely to keep the process alive, restart loops, hidden keepalive
+work, or restrictions-evasion hacks. Use documented Media3 resumption APIs where appropriate.
+Android 17/API 37 and later versions may enforce additional background-audio/foreground-service conditions. Read current
+official behavior-change documentation for the selected target SDK and implement its requirements, including any
+eligible user-initiated start, visible-activity, foreground-service, or while-in-use capability conditions. Never assume
+older Android rules still apply.
+
+QUEUE, POSITION, AND LONG-FORM STATE
+Music queues, audiobook sessions, and TTS segments may share the player but must not corrupt each other's state. Use
+Long for positions, durations, offsets, and timestamps when a 32-bit integer could overflow. Check library APIs for
+narrower limits and handle them explicitly. Persist enough state to resume reliably: media URI/stable content reference,
+content type, position, queue/book identity, chapter/segment where relevant, speed, suitable repeat/shuffle state,
+document identity, and reading anchor. URI grants can be revoked, so revalidate access and recover gracefully instead of
+crashing or endlessly retrying.
+
+AUDIOBOOK EXPERIENCE
+Treat audiobooks as a first-class use case. Support remembered position, chapter navigation when metadata exists,
+chapter-aware progress where possible, configurable skip intervals, playback speed, sleep timer, bookmarks, current-book
+presentation, library sorting/progress, per-book speed/settings when useful, and recovery after process death/app
+update/device restart within Android's supported lifecycle model.
+Handle books at least 200 hours long; include synthetic or fixture-based long-duration tests. Do not load the entire
+book, every chapter, or every bookmark into memory where a small window suffices. Avoid overflowing position types;
+index chapters incrementally when needed. Parse embedded chapter data carefully where supported. For formats without
+reliable chapters, offer stable bookmarks and sensible manual navigation rather than inventing chapter titles. Use clear
+units and accessible feedback when seeking or jumping; avoid controls so small or tightly spaced that they are difficult
+to use one-handed. Saving progress should be resilient without writing to the database on every tiny playback tick.
+
+TTS AND OFFLINE READ ALOUD: CRITICAL CONTRACT
+Design for actual offline limits. Do not claim every Android phone or voice can synthesize offline. Discover installed
+TextToSpeech engines and voices dynamically. Support Google's engine where installed and suitable, but never assume it
+exists on all devices; account for manufacturer engines, default-engine differences, voice/language packs, and engine
+limitations.
+Strict Offline Speech must be enabled by default. In this mode, Murmur must not deliberately select a voice that
+declares it requires network connectivity, must not silently switch to a network-dependent voice when offline speech is
+unavailable, and must not attempt to bypass engine networking requirements. Use platform APIs such as
+Voice.isNetworkConnectionRequired() where applicable. Internally distinguish at least: Known Offline, Network Required,
+Voice Data Missing, Unknown, and Unavailable. A voice reporting no network requirement is useful evidence, not absolute
+proof that a third-party engine will always work offline. Never label a voice guaranteed offline based only on that
+property.
+Recognize distinct states: no compatible engine, no voice for selected language, voice data missing, only
+network-required voices available, engine initialization failure, synthesis failure, and unknown/unverifiable offline
+behavior. Explain failures plainly and provide a route to Android's TTS settings using a valid system settings intent
+when available. Do not imply Murmur downloaded or installed voice data. Engine/system-managed installation is outside
+Murmur's control. The rest of the app must remain usable without offline TTS.
+Validate genuine synthesis, not only cache playback: with Airplane Mode enabled and Wi-Fi/mobile data disabled,
+synthesize fresh uncached text that has never been synthesized before on a compatible device/engine. A cached audio file
+playing offline does not prove that synthesis works offline. Indicate the basis for offline status honestly; do not show
+a confident green Offline label when behavior is unknown. Where feasible, provide a local test workflow for unknown
+engines.
+
+TEXT-TO-SPEECH IMPLEMENTATION
+Create a dedicated TTS manager/service abstraction for engine selection, asynchronous initialization, voice discovery,
+language eligibility, speech settings, errors, and cleanup. Do not place raw TextToSpeech calls across
+composables/screens. Follow platform lifecycle rules: wait for initialization callbacks; select validated
+languages/voices; handle LANG_MISSING_DATA, LANG_NOT_SUPPORTED, and related results; respond to engine/voice changes;
+handle utterance callbacks, stop/release resources correctly; and avoid leaking listeners, callbacks, service
+references, or Activity contexts. Coordinate pending utterances and callbacks without races.
+Use unique, traceable utterance IDs and a bounded scheduler. Ensure callbacks from cancelled or superseded tasks cannot
+update the current document's UI or progress. Never enqueue an entire 200-hour book into the engine. Divide text into
+manageable sentence-level or otherwise appropriate speech segments, preserving punctuation and meaningful pauses as far
+as the engine permits. Keep document structure (headings, paragraphs, chapters) separate from TTS segments; a sentence
+must not become a permanent paragraph or bookmark anchor. Commit reading progress at safe boundaries and on explicit
+pause/exit, not only when a whole book completes.
+Where supported, synthesize to local files through an appropriate API such as TextToSpeech.synthesizeToFile, then play
+resulting audio through the shared Media3 pipeline. Verify exact API behavior, engine support, callback semantics, and
+file handling before implementing. If an engine cannot support this path, explain and handle that limitation explicitly
+rather than secretly introducing a competing player architecture. Coordinate system-engine queues and local file
+playback so generation cannot become unbounded or exhaust memory/storage.
+
+OPTIONAL LOCAL NEURAL TTS
+A local neural runtime (for example, a vetted Sherpa-ONNX setup) may be considered as an advanced/future feature. Do not
+add a large native runtime, huge models, or a second TTS stack to the first milestone without checking licenses, Android
+ABIs, model licensing, size, performance, memory, and maintenance.
+If implemented, let users import model packs using SAF. Validate manifests, file integrity, version compatibility,
+supported languages, and required assets; prevent path traversal and malformed-package attacks; show expected storage
+requirements; never download models automatically; and run synthesis entirely on-device after import. Keep models out of
+the APK unless licensing and product benefits justify bundling. Let users safely remove packs and reclaim storage.
+Review runtime/model licenses and manage CPU, memory, heat, and battery use on lower-end phones. The promise is
+on-device speech when a compatible offline system voice or user-imported model is available, not universal offline TTS
+on all devices.
+
+DOCUMENT LIBRARY AND PARSING
+Let users open/import documents through Android's document picker and supported share intents. Prioritize TXT and
+Markdown; add HTML, EPUB, and PDF with suitable local parsers and clearly documented limitations. Preserve headings,
+paragraphs, lists, chapter boundaries, and navigation landmarks where the source provides them. Do not claim format
+support until representative files have been tested.
+For PDF, use a local library/platform API to extract selectable text. OCR is out of scope for v1; clearly explain that
+scanned-image PDFs may not have extractable text without OCR. Never send document contents to a remote service. Sanitize
+HTML and prevent scripts or remote resources from making it a network-enabled browser. Do not fetch remote images,
+stylesheets, fonts, media, or linked content automatically. External links may be displayed as plain references; if
+users choose to open one, hand off to the system deliberately rather than fetching it inside Murmur, and never add app
+internet access to support it. Preserve a table of contents or internal navigation where the local parser provides it;
+handle malformed or unsupported files with a useful explanation rather than a crash.
+Process large documents incrementally; never load multi-gigabyte files fully into memory. Use streaming/lazy parsing,
+reasonable size limits, malformed-input handling, cancellable parsing/indexing, responsive UI, and progress where
+operations take noticeable time. Support formats actually implemented and tested: TXT, Markdown, HTML, EPUB, and PDF as
+feasible.
+
+READING EXPERIENCE AND POSITION ANCHORS
+Provide a distraction-light reader with adjustable text size, line spacing, margins, readable theme-aware colors,
+large-font support, headings and paragraph boundaries. Where supported, include tap-to-read, pause/resume,
+sentence/paragraph skipping, sentence highlighting when timing is reliable, returning to text from playback controls,
+bookmarks, stable positions, chapter navigation, and clear messaging when synchronization is coarse.
+Do not claim word/sentence synchronization when the engine only offers coarse utterance callbacks. Use stable structural
+anchors rather than raw character offsets alone. An anchor may include document identity, section/chapter ID, paragraph
+ID, and local offset/segment ID. Handle parser changes and missing source files gracefully. Keep the document's
+structure separate from TTS segmentation so changing voice or segment size does not destroy bookmarks or make the
+reading position meaningless. Store enough source identity to detect missing or changed content; if an anchor cannot be
+restored exactly, recover to the nearest meaningful section and tell the user instead of silently jumping to an
+arbitrary place.
+
+TTS CACHE AND SYNTHESIS SCHEDULING
+Generated speech can consume significant storage, so implement a bounded cache with explicit create/reuse/evict/cleanup
+rules. Never synthesize a whole book automatically on first open. Synthesize near the current position and only a small,
+controlled amount ahead. Bound concurrent work; cancel when the user seeks, switches documents/voices, or leaves
+reading. Avoid duplicate work and include document/content identity, voice, language, and relevant speech settings in
+cache identity. Store only what is needed to identify reusable results; prefer a stable key/hash rather than storing
+full document text in diagnostic metadata. Use cache leases or equivalent reference tracking so eviction cannot delete
+an actively playing file. Cap cache size with sensible defaults/configuration, let users inspect/clear it, and handle
+disk-full errors, partial files, interrupted generation, invalid cache entries, and process death. Cache playback is
+never evidence that a voice can synthesize offline.
+If whole-book generation is added later, make it an explicit staged, resumable, cancellable task, not default behavior.
+Show estimated/measured storage use when practical, recover after interruption, and obey current Android
+background-work/foreground-service limits. Do not assume indefinite background execution.
+
+PLAYBACK CONTROLS, TIMERS, AND AUDIO QUALITY
+Provide practical, validated audiobook/TTS speed controls and handle engine restrictions. Remember speed per book or
+content type when it improves consistency. Include a simple sleep timer with practical presets or direct duration entry,
+a clear cancel action, and optional end-of-chapter behavior only when boundaries are known. Timer behavior must follow
+the user's selected pause/stop action and use lifecycle-safe implementation without hidden perpetual services.
+Optional audio enhancements belong after base playback is stable. Consider gapless playback where supported,
+ReplayGain/equivalent loudness metadata, safe volume headroom/preamp, and an understandable EQ/sound settings screen
+only where the platform/stack supports it reliably. Explain active effects and limitations. Do not claim bit-perfect
+output without proof or imply an unsupported effect is active. Keep enhancements optional, safe by default, and avoid
+DSP that adds needless latency, battery drain, or compatibility problems.
+
+SYSTEM INTEGRATION AND OEM RESILIENCE
+Implement appropriate media notifications, lock-screen controls, media metadata, headset/Bluetooth actions, app
+shortcuts, and (only if reliable) useful home-screen widgets. Receive Android Sharesheet local files/content URIs and
+implement Open With for supported media/document formats. Handle URI grants correctly. Do not implement or advertise
+Android Auto in v1 and do not add car-related dependencies. Widgets must show useful state/actions, respect update
+limits, and be deferred if they cannot be maintained reliably.
+Manufacturer battery managers differ. Use standard media-session and foreground-service behavior and provide practical,
+accurate troubleshooting for affected devices. Never promise to defeat every OEM process killer. Do not use abusive wake
+locks, hidden restart loops, invisible activities, or other policy evasions. Any battery-optimization request must be
+transparent, narrowly justified, and optional, never requested by default. Troubleshooting should explain
+user-controlled system settings without blaming the user or claiming the app can override OEM policy. Test screen-off
+playback, lock-screen controls, audio focus, process recreation, explicit stop actions, and available common
+manufacturer variants. Document limitations truthfully.
+
+STORAGE MANAGEMENT
+Provide a simple view of app-managed metadata, generated TTS cache, optional local model packs, temporary/interrupted
+import data, bookmarks, and settings. Distinguish original media, references to user files, copied content, and
+generated audio; do not misrepresent location or ownership. Clearing Murmur's cache must never delete original user
+media. Offer safe cache cleanup and model-pack removal, warn before destructive app-managed-data actions, and handle
+partial operations, stale entries, and revoked permissions.
+
+BACKUP AND RESTORE
+Consider offline, user-initiated export/import of Murmur's database and preferences. Never upload backups. Clearly state
+whether a backup includes original media, only references, generated audio, or model packs. If full media backup is not
+supported, say so. Validate backup format/version on restore, handle schema changes and revoked file access, and require
+explicit consent before overwriting data. Use transactional database operations where appropriate.
+
+DATABASE AND PERSISTENCE
+Use Room for relational data such as Murmur-maintained media metadata, bookmarks, document reading state, audiobook
+progress, playlists if implemented, and app-managed records. Use DataStore for small preferences such as theme, skip
+intervals, playback choices, reader typography, and simple settings. Define entities, DAOs, repositories, and
+transactions clearly; use background dispatchers; add indexes for real queries; implement migrations rather than
+destructive production migrations unless intentional data loss is clearly documented for development-only builds. Do not
+put huge document bodies or audio in database blobs. Save progress frequently enough for long-form reliability without
+excessive writes. Make restore resilient to missing media and revoked URI permissions.
+
+ACCESSIBILITY AND INTERNATIONALIZATION
+Support TalkBack and standard accessibility services, meaningful descriptions for icon-only controls/widgets, logical
+focus order, sufficient contrast, visible focus as applicable, large touch targets, and system font scaling without
+clipping critical controls. Do not rely on icons alone when labels/descriptions are needed. Use Android localization
+resources rather than hard-coded user-facing strings; English can be the first language but support future localization.
+Handle language tags correctly for voices and document content.
+
+PERFORMANCE, SAFETY, AND DIAGNOSTICS
+Make startup fast; avoid main-thread I/O, unnecessary allocation, busy polling, and expensive recomposition. Use
+paging/lazy lists for large libraries, lazy/incremental document parsing and chapter indexing, and off-main-thread
+metadata parsing and synthesis. Bound caches, concurrent work, open file handles, and queues. Make long work
+cancellable. Recover from low memory, disk-full errors, codec/decoder errors, malformed metadata, and process death
+without sacrificing data integrity.
+Treat all selected files and imported metadata as untrusted: validate sizes/structures; handle unusual filenames,
+malformed archives, invalid encodings, corrupted metadata, malformed HTML/EPUB/PDF, and revoked grants; prevent path
+traversal when unpacking archives or model packs; never execute document scripts or imported code. Do not assume a
+content URI is a normal filesystem path. Use ContentResolver/supported APIs and reliably close streams/file descriptors.
+Show useful explanations and concrete recovery steps, not raw stack traces, silent failure, or battery-draining retry
+loops. Local diagnostics should cover missing engine/voice, unavailable offline voice, synthesis failure, missing
+permissions/files, unsupported formats, decoder errors, full storage, corrupt imports/backups, and interrupted
+operations. Never transmit diagnostic data.
+
+DEPENDENCY AND LICENSE REVIEW
+Before adding a dependency, justify its need and assess maintenance, license, Android compatibility, APK size,
+transitive dependencies, permissions/network behavior, and privacy. Prefer official AndroidX where sufficient. Review
+licenses for document parsers, EPUB/PDF libraries, native TTS runtimes, codecs, models, and bundled assets. Do not
+bundle proprietary/restricted voice models without permission. Include required third-party notices in the repository.
+Avoid a large native TTS runtime without demonstrated need, a device performance plan, and license review.
+
+TESTING STRATEGY
+Build and test continuously; do not wait until the end. Include:
+1. Build/security: clean Gradle build, unit tests, lint/static checks where available, merged-manifest inspection,
+dependency and permission audit.
+2. Persistence: Room creation/migrations, state restoration after process recreation, document anchors/bookmarks,
+missing files and revoked grants, backup validation if implemented.
+3. Playback: play/pause/resume/seek/next/previous, queue changes, audio focus/noisy output, notifications/lock-screen
+controls, screen-off playback, lifecycle and process death, long-duration positions.
+4. TTS: no engine, initialization failure, unsupported language, missing voice data, network-required voice, reported
+offline voice, unknown status, synthesis errors, cancellation, switching voice/document mid-synthesis, bounded queue,
+cache cleanup while playing, and fresh uncached synthesis in Airplane Mode.
+5. Documents: large TXT/Markdown, varied encodings/malformed input, large EPUB/HTML fixtures, text PDFs, scanned-PDF
+limitation messaging, cancelled import, lost permission, stable reopen position.
+6. Storage/resilience: low storage, corrupt/partial cache entries, malformed archives, restart during long tasks, repeat
+imports/duplicates, cache cleanup preserving originals.
+7. Accessibility/UI: TalkBack labels, large font scale, themes, small screens and relevant landscape layouts,
+empty/loading/error/success states, keyboard/focus behavior where relevant.
+Use fakes for difficult lifecycle/engine cases but do not claim fake tests prove real offline behavior. Real-device
+checks are required for platform TTS, target-SDK background restrictions, and OEM variation. Tests should be
+deterministic where possible, isolated from personal libraries, and repeatable from the documented command line. Report
+tests that could not run due to absent hardware or unavailable engines as not performed, not passed.
+
+LONG-FORM ACCEPTANCE TESTS
+Explicitly test: audiobook resume after a simulated long session; a media position exceeding 32-bit milliseconds or any
+narrower internal representation; very large chapters/document structures without eager full loading; long TTS sessions
+with bounded memory/cache/queue; voice changes mid-document without anchor corruption; cache eviction during active
+playback; screen-off playback using supported Android APIs; and graceful behavior when selected voice cannot synthesize
+offline. Synthetic-duration fixtures are acceptable when a 200-hour media file is impractical, but production code must
+use safe types and must not rely on fixture size.
+
+IMPLEMENTATION PHASES
+Work in small verifiable stages. After each phase, run the relevant build/tests, fix failures, and record what is
+actually complete. Adjust ordering only when technical discoveries justify it; never skip verification.
+PHASE 1, FOUNDATION: Create the clean project and Gradle wrapper; configure Kotlin/Compose/Material 3/SDK/toolchain,
+packages, navigation shell, theme, test infrastructure, and only essential dependencies. Confirm command-line build and
+no INTERNET permission/network dependency.
+PHASE 2, STORAGE/ACCESS: Add Room/DataStore; implement MediaStore/SAF access, schema, repositories, migration
+scaffolding, URI permission handling, tests, empty/error states.
+PHASE 3, MUSIC PLAYBACK: Add Media3 ExoPlayer, MediaSession, and MediaSessionService; implement browsing, queue,
+notification/system controls, audio focus, and progress persistence. Verify target-SDK foreground/screen-off behavior on
+a real or suitable emulator device.
+PHASE 4, AUDIOBOOKS: Add book library, chapters where supported, bookmarks, skip controls, speed, sleep timer, durable
+resume, process-death recovery, long-duration tests.
+PHASE 5, DOCUMENTS: Implement TXT/Markdown first; add supported HTML/EPUB/PDF only after choosing and reviewing parsers.
+Preserve structure, stable anchors, and incremental large-document processing; reader must be useful without TTS.
+PHASE 6, STRICT OFFLINE TTS: Discover engines/voices dynamically; implement eligibility/status classification, Strict
+Offline default, language selection, bounded/cancellable synthesis, Media3 integration, cache, and clear failure states.
+Test fresh synthesis offline and audit for network permission/fallback.
+PHASE 7, READER/PLAYBACK: Connect tap-to-read, sentence/paragraph navigation, bookmarks/anchors, highlighting only where
+timing supports it, and return-to-text. Verify voice changes, seeking, reopening, and process recovery preserve
+positions.
+PHASE 8, QUALITY OF LIFE: Add storage management, safe cache cleanup, preferences, shortcuts, share/open-with support,
+and reliable widgets. Consider audio controls and local backup/restore only when they can be done safely.
+PHASE 9, RELEASE HARDENING: Review dependencies/licenses; run tests, lint, clean build, manifest audit, multiple Android
+versions where practical, target-SDK background behavior, real-device offline TTS, accessibility/large fonts, long-form
+operation, error/storage recovery, and startup performance. Document actual limitations.
+
+SCOPE CONTROL / NON-GOALS
+Do not add these to v1 unless core requirements are complete and the addition has a clear justification: music
+streaming, accounts/cloud sync, remote metadata/search, ads/analytics/telemetry, Android Auto, OCR for scanned
+documents, automatic voice/model downloads, whole-book TTS generation on import, elaborate social features, media-server
+complexity, or a large bundled neural voice model without verified licensing/performance. The first release should do a
+smaller set of things very well; every extra feature adds maintenance, testing, storage, and compatibility costs.
+
+DELIVERABLES
+Create a complete source repository including: all source/resources; Gradle wrapper/build configuration; clear
+project/package structure; relevant Room entities/DAOs/migrations/repositories; functional Compose UI; playback and
+MediaSession implementation; parsing/reading for formats actually supported; TTS strict-offline handling for
+capabilities actually supported; appropriate unit/instrumentation tests; local build instructions; a concise README
+covering features, formats, privacy, setup, testing, and limits; third-party license notices; and troubleshooting for
+offline voices, Android TTS settings, and background playback. README must not claim features absent from code;
+distinguish implemented from planned/deferred features.
+
+FINAL VERIFICATION CHECKLIST
+[ ] Created from scratch and builds using Gradle wrapper.
+[ ] Stable SDK/AGP/Kotlin/Gradle versions are compatible.
+[ ] Local music library and core controls work.
+[ ] Playback uses the intended shared Media3 player/session/service architecture.
+[ ] Notifications, lock-screen controls, audio focus, and screen-off behavior comply with Android rules.
+[ ] Audiobooks resume correctly and long positions cannot overflow.
+[ ] README's claimed document formats work; large documents are processed incrementally.
+[ ] Anchors/bookmarks survive normal restarts.
+[ ] Engines/voices are discovered dynamically; Strict Offline Speech is on by default.
+[ ] Murmur does not deliberately select network-required voices or silently fall back online.
+[ ] UI explains missing voice data/unavailable offline speech accurately.
+[ ] Fresh uncached synthesis is tested in Airplane Mode on a compatible real device/engine.
+[ ] TTS scheduling is bounded/cancellable and generated audio uses the shared playback pipeline.
+[ ] Cache eviction cannot delete audio currently in use.
+[ ] Optional model packs, if present, are user-imported, validated, locally run, and license-reviewed.
+[ ] Cache clearing never deletes original user media.
+[ ] Database migrations/persistence, accessibility, large text, themes, errors, and low-end behavior are tested.
+[ ] Final merged manifest has no INTERNET permission and no network-required feature has slipped in.
+[ ] No ads, analytics, telemetry, cloud, or streaming dependencies remain.
+[ ] Dependencies, bundled assets, models, permissions, size, and licensing are reviewed.
+[ ] Automated tests and clean build pass, or remaining failures are disclosed accurately.
+[ ] README/troubleshooting describe actual behavior without overclaiming offline compatibility or OEM resilience.
+
+WORKING METHOD AND COMMUNICATION
+Work toward a usable application, not a design-only proposal. First inspect the available development environment and
+briefly state the implementation plan. Then create the project and complete the first verifiable milestone; continue in
+coherent increments, building and testing after meaningful changes. For APIs or behavior that may have changed, consult
+current official Android/AndroidX documentation, especially foreground services, background audio, Media3, SAF, and
+TextToSpeech requirements for the selected target SDK.
+When blocked by the environment, state the precise limitation, what was verified, what remains, and the next concrete
+step. Never say a command passed unless it ran and its result was checked. Never fabricate test results, real-device
+testing, offline guarantees, or completed functionality. Make pragmatic decisions without asking permission for every
+minor choice; ask only when an important product decision is genuinely blocking, otherwise use and document a sensible
+default.
+
+ULTIMATE STANDARD
+Murmur should make it easy to play local music, keep listening to very long audiobooks, and read personal documents
+aloud using on-device speech when a compatible offline system voice or imported local model is available. Murmur itself
+must remain independent of internet access, its core flows must be simple, and its behavior must be honest, reliable,
+secure, accessible, and tested.)

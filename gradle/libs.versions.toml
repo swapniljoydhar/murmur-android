@@ -20,6 +20,7 @@ kotlinxCoroutinesTest = "1.8.0"
 documentfile = "1.1.0"
 appcompat = "1.6.1"
 cardview = "1.0.0"
+robolectric = "4.14.1"
 
 [libraries]
 androidx-activity-compose = { module = "androidx.activity:activity-compose", version.ref = "activityCompose" }
@@ -52,6 +53,7 @@ androidx-documentfile = { module = "androidx.documentfile:documentfile", version
 kotlinx-coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", version.ref = "kotlinxCoroutinesTest" }
 androidx-appcompat = { module = "androidx.appcompat:appcompat", version.ref = "appcompat" }
 androidx-cardview = { module = "androidx.cardview:cardview", version.ref = "cardview" }
+robolectric = { module = "org.robolectric:robolectric", version.ref = "robolectric" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
