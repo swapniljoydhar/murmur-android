@@ -33,6 +33,11 @@ MediaSessionService
 - **SystemTtsSpeechGenerator**: System TTS with voice selection, strict offline mode. Writes WAV chunks to
   `cache/read-aloud`, keyed by SHA-256 over synthesis identity, voice identity and chunk text, and evicts
   by age and total size while sparing files still referenced by the playback queue.
+- **WavDuration**: reads a cached segment's exact duration from its RIFF header (sample rate, channels,
+  bit depth), so a cache hit reports the same duration as the synthesis that produced it. Rejects
+  truncated files so they are rebuilt instead of mis-measured.
+- **SpeechCacheEviction**: the eviction policy on its own — age, size cap, queue protection, stale scratch
+  files — unit-tested without a speech engine.
 - **SynthesisIdentity**: the engine/voice/locale/format tuple that makes two synthesis results distinct.
 
 There is no look-ahead scheduler and no batch generator. An earlier `TtsScheduler`/`BatchTtsManager`/

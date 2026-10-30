@@ -126,6 +126,11 @@ class SystemTtsSpeechGenerator(context: Context) {
                 }
             }
 
+            override fun onStop(utteranceId: String, interrupted: Boolean) = fail(
+                utteranceId,
+                IllegalStateException("The system speech engine stopped before finishing this page."),
+            )
+
             override fun onError(utteranceId: String) = fail(utteranceId, IllegalStateException("The system speech engine couldn't synthesize this page."))
 
             override fun onError(utteranceId: String, errorCode: Int) = fail(
@@ -219,12 +224,15 @@ class SystemTtsSpeechGenerator(context: Context) {
                 currentCoroutineContext().ensureActive()
                 val digest = sha256("$identity|$voiceIdentity|${chunk.text}")
                 val destination = File(outputDirectory, "$digest.wav")
-                if (destination.isFile && destination.length() > 44L) {
+                val cachedDurationMs = if (destination.isFile) WavDuration.of(destination) else null
+                if (cachedDurationMs != null) {
                     destination.setLastModified(System.currentTimeMillis())
-                    // For cached files, estimate duration from file size
-                    val estimatedDurationMs = estimateDurationFromFile(destination)
-                    GeneratedSpeechFile(destination, index, chunk.sourceOffset, chunk.sentenceIds, chunk.sentenceStartOffsets, chunk.text.length, estimatedDurationMs)
+                    // Read the real duration out of the WAV header: the same file must report the same
+                    // duration on a cache hit as it did when it was synthesized.
+                    GeneratedSpeechFile(destination, index, chunk.sourceOffset, chunk.sentenceIds, chunk.sentenceStartOffsets, chunk.text.length, cachedDurationMs)
                 } else {
+                    // Not cached, or a truncated/undecodable leftover from an interrupted write.
+                    if (destination.isFile) destination.delete()
                     // Check free space before synthesis
                     if (!hasFreeSpace()) {
                         throw IllegalStateException("Insufficient storage space for speech synthesis. Free up space and try again.")
@@ -250,16 +258,6 @@ class SystemTtsSpeechGenerator(context: Context) {
             // If we can't determine free space, allow the operation
             return true
         }
-    }
-
-    private fun estimateDurationFromFile(file: File): Long {
-        // WAV header is 44 bytes, rest is PCM data
-        val dataSize = file.length() - 44
-        if (dataSize <= 0) return 0
-        // Assume standard 22050 Hz, 1 channel, 16-bit (typical for Android TTS)
-        // This is a fallback estimate; actual duration is stored when freshly synthesized
-        val assumedByteRate = 22050 * 1 * 16 / 8 // 44100 bytes/sec
-        return (dataSize * 1000L) / assumedByteRate
     }
 
     fun shutdown() {
@@ -306,22 +304,7 @@ class SystemTtsSpeechGenerator(context: Context) {
     }
 
     private fun evictSpeechCache(protectedKeys: Set<String>) {
-        val now = System.currentTimeMillis()
-        val waveFiles = outputDirectory.listFiles { file -> file.isFile && file.extension == "wav" }.orEmpty()
-        var totalBytes = waveFiles.sumOf(File::length)
-        waveFiles.sortedBy(File::lastModified).forEach { file ->
-            val cacheKey = file.nameWithoutExtension
-            val protected = cacheKey in protectedKeys
-            val expired = now - file.lastModified() > SPEECH_CACHE_MAX_AGE_MILLIS
-            if (!protected && (expired || totalBytes > SPEECH_CACHE_MAX_BYTES)) {
-                val size = file.length()
-                if (file.delete()) totalBytes -= size
-            }
-        }
-        outputDirectory.listFiles { file ->
-            file.isFile && (file.name.endsWith(".part") || file.name.startsWith("speech-") || file.name.startsWith("engine-")) &&
-                now - file.lastModified() > SPEECH_TEMP_MAX_AGE_MILLIS
-        }.orEmpty().forEach(File::delete)
+        SpeechCacheEviction.evict(outputDirectory, protectedKeys)
     }
 
     private fun writeWave(capture: Capture): Long {
@@ -494,8 +477,5 @@ class SystemTtsSpeechGenerator(context: Context) {
         // Activity, reader, and playback service instances share one cache directory.
         // Serialize voice changes, synthesis, and eviction across all of them.
         val processSynthesisMutex = Mutex()
-        const val SPEECH_CACHE_MAX_BYTES = 256L * 1024L * 1024L
-        const val SPEECH_CACHE_MAX_AGE_MILLIS = 30L * 24L * 60L * 60L * 1_000L
-        const val SPEECH_TEMP_MAX_AGE_MILLIS = 24L * 60L * 60L * 1_000L
     }
 }

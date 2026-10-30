@@ -4,7 +4,9 @@
 
 The reader asks `SystemTtsSpeechGenerator` to synthesize the current document page with Android's installed `TextToSpeech` engine. Generated WAV files are cached under the app cache directory and queued through the shared Media3 playback service. The service can synthesize the next page for continuous reading and saves a document character offset (or PDF page index) at segment boundaries and playback lifecycle events.
 
-Voice selection and synthesis are serialized across generator instances in the process because the Activity, reader, and playback service can each own an engine instance while sharing the cache. Cache files are keyed with SHA-256 over synthesis identity, voice identity, and chunk text. Cache eviction is size/age based and avoids deleting files currently referenced by the playback queue. Cache pinning protects the currently playing segment and queued segments from eviction during rapid seeking.
+Voice selection and synthesis are serialized across generator instances in the process because the Activity, reader, and playback service can each own an engine instance while sharing the cache. Cache files are keyed with SHA-256 over synthesis identity, voice identity, and chunk text. Cache eviction (`SpeechCacheEviction`) is size/age based, oldest first, and spares files still referenced by the playback queue plus anything younger than the temporary-file window. There is no separate pinning API: the queue reference is the protection, and it is persisted, so it survives process death.
+
+Cached files are content-addressed, so they need no index to be found again: the same text and the same voice identity hash to the same name. The one thing a name cannot carry is how long the audio is, and the duration is written into the persisted segment map, so `WavDuration` reads it back out of the WAV header (real sample rate, channel count and bit depth) instead of assuming 22 050 Hz mono. A hit and a fresh synthesis now report the same duration. A truncated or unparseable file is treated as a miss and rebuilt rather than played with a wrong length.
 
 ## Strict Offline Speech
 
