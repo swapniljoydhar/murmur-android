@@ -1,0 +1,6 @@
+{
+  "name": "Murmur",
+  "description": "Local-first Android app for music, audiobooks, documents, and system Read Aloud.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
