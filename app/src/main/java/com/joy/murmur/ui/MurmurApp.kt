@@ -118,9 +118,11 @@ import com.joy.murmur.playback.parseReadAloudStartMediaId
 import com.joy.murmur.playback.SleepTimer
 import com.joy.murmur.playback.SelectedAudio
 import com.joy.murmur.playback.readAloudMediaId
-import com.joy.murmur.playback.markdownForSpeech
 import com.joy.murmur.playback.ReadAloudUtils.buildSpokenIndexMap
-import com.joy.murmur.playback.ReadAloudUtils.mapTapOffsetToSegment
+import com.joy.murmur.playback.ReadAloudSegmentMapping
+import com.joy.murmur.playback.ReadAloudUtils.speechTextFor
+import com.joy.murmur.playback.ReadAloudUtils.spokenOffsetForTap
+import com.joy.murmur.playback.persistReadAloudSegmentMap
 import com.joy.murmur.playback.ReadAloudUtils.buildInverseSpokenIndexMap
 import com.joy.murmur.playback.toStableMediaId
 import com.joy.murmur.playback.BackgroundPlaybackHealth
@@ -1203,28 +1205,25 @@ private fun ReaderScreen(
     var inverseSpokenIndexMap by remember { mutableStateOf<IntArray?>(null) }
     var currentSentenceIdx by remember { mutableStateOf<Int?>(null) }
 
-    // Query segment map when Read Aloud is playing for this document
-    LaunchedEffect(playback, documentId) {
+    // Query the segment map whenever the playing segment, the page, or the document type changes.
+    // `page` matters: the map was previously built only if the text happened to be loaded already,
+    // so highlighting and tap-to-read stayed dead when the speech started first.
+    LaunchedEffect(playback, documentId, page, document?.mimeType) {
         val current = playback.current
-        if (current != null && current.contentType == PlaybackContentType.READ_ALOUD) {
-            val segment = parseReadAloudMediaId(current.id)
-            if (segment?.documentId == documentId) {
-                scope.launch(Dispatchers.IO) {
-                    val database = PlaybackDatabase.getInstance(context)
-                    val dao = database.playbackDao()
-                    val map = dao.getSegmentMap(documentId, segment.sourceOffset)
-                    currentSegmentMap = map
-                    if (map != null && page.isNotEmpty()) {
-                        val spokenMap = buildSpokenIndexMap(page)
-                        spokenIndexMap = spokenMap
-                        inverseSpokenIndexMap = buildInverseSpokenIndexMap(spokenMap)
-                    }
-                }
+        val segment = current
+            ?.takeIf { it.contentType == PlaybackContentType.READ_ALOUD }
+            ?.let { parseReadAloudMediaId(it.id) }
+        if (segment?.documentId == documentId && page.isNotEmpty()) {
+            val dao = PlaybackDatabase.getInstance(context).playbackDao()
+            val map = withContext(Dispatchers.IO) { dao.getSegmentMap(documentId, segment.sourceOffset) }
+            currentSegmentMap = map
+            val spokenMap = if (map != null) {
+                buildSpokenIndexMap(page, speechTextFor(page, document?.mimeType))
             } else {
-                currentSegmentMap = null
-                spokenIndexMap = null
-                inverseSpokenIndexMap = null
+                null
             }
+            spokenIndexMap = spokenMap
+            inverseSpokenIndexMap = spokenMap?.let { buildInverseSpokenIndexMap(it) }
         } else {
             currentSegmentMap = null
             spokenIndexMap = null
@@ -1242,8 +1241,12 @@ private fun ReaderScreen(
                 val segmentDuration = map.segmentDurationMs.coerceAtLeast(1)
                 val sentenceCount = Json.decodeFromString<List<String>>(map.sentenceIdsJson).size
                 if (sentenceCount > 0) {
-                    val sentenceDuration = segmentDuration / sentenceCount.toLong()
-                    val idx = (playback.positionMs / sentenceDuration).coerceIn(0L, sentenceCount - 1L).toInt()
+                    // Multiply before dividing: an integer "sentence duration" rounds down to zero for
+                    // a very short segment and would divide by zero. Round to nearest so this is the
+                    // exact inverse of the tap-to-read seek position (duration * sentence / count).
+                    val idx = ((playback.positionMs * sentenceCount + segmentDuration / 2) / segmentDuration)
+                        .coerceIn(0L, sentenceCount - 1L)
+                        .toInt()
                     currentSentenceIdx = idx
                 }
             }
@@ -1264,7 +1267,7 @@ private fun ReaderScreen(
             synthesizing = true
             speechError = null
             try {
-                val spokenText = if (currentDocument.mimeType == "text/markdown") markdownForSpeech(page) else page
+                val spokenText = speechTextFor(page, currentDocument.mimeType)
                 val identity = speechGenerator.currentIdentity()
                 val generated = speechGenerator.synthesize(
                     text = spokenText,
@@ -1295,6 +1298,10 @@ private fun ReaderScreen(
                     if (currentPlayback.items.map { it.id } != queueIdsAtRequest || currentPlayback.currentIndex != currentIndexAtRequest) {
                         speechError = "Playback changed while speech was being prepared. Start Read Aloud again."
                     } else {
+                        // Persist the sentence map for this page before it starts playing: highlighting
+                        // and tap-to-read both read it back out of the database.
+                        val dao = PlaybackDatabase.getInstance(context).playbackDao()
+                        persistReadAloudSegmentMap(dao, currentDocument.id, pageStart, sourcePage.length, generated)
                         playbackController.playSelected(items)
                     }
                 }
@@ -1574,12 +1581,8 @@ private fun ReaderScreen(
             Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
                 if (document?.mimeType == "text/markdown") {
                     val type = MaterialTheme.typography
-                    val highlightedPage = if (currentSentenceIdx != null && currentSegmentMap != null) {
-                        // Build AnnotatedString with highlighted sentence for markdown
-                        // For simplicity, we'll just render the markdown without sentence highlighting for now
-                        // since markdown rendering is block-based
-                        page
-                    } else page
+                    // Sentence highlighting is plain-text only: markdown is rendered block by block, so
+                    // there is no character range to paint. docs/READER.md states this.
                     MaterialTheme(
                         typography = type.copy(
                             bodyLarge = type.bodyLarge.copy(fontSize = type.bodyLarge.fontSize * readerTextScale),
@@ -1588,7 +1591,7 @@ private fun ReaderScreen(
                             titleMedium = type.titleMedium.copy(fontSize = type.titleMedium.fontSize * readerTextScale),
                             titleSmall = type.titleSmall.copy(fontSize = type.titleSmall.fontSize * readerTextScale),
                         ),
-                    ) { MarkdownReaderContent(highlightedPage) }
+                    ) { MarkdownReaderContent(page) }
                 } else if (document?.mimeType == "text/plain") {
                     val pageStart = position ?: document.positionChars
                     var textLayout by remember(page) { mutableStateOf<TextLayoutResult?>(null) }
@@ -1603,21 +1606,25 @@ private fun ReaderScreen(
                     Text(
                         text = highlightedText,
                         modifier = Modifier
-                            .pointerInput(page, pageStart, currentSentenceIdx, currentSegmentMap, playbackController, playback) {
+                            .pointerInput(page, pageStart, currentSentenceIdx, currentSegmentMap, spokenIndexMap, playbackController, playback) {
                                 detectTapGestures { tapOffset ->
                                     val offset = textLayout?.getOffsetForPosition(tapOffset) ?: return@detectTapGestures
-                                    // Tap-to-Read: if Read Aloud is active, seek to tapped sentence
-                                    if (currentSegmentMap != null && spokenIndexMap != null) {
-                                        val segmentSourceOffset = mapTapOffsetToSegment(offset, spokenIndexMap!!, currentSegmentMap!!)
-                                        if (segmentSourceOffset != null) {
-                                            // Find the matching segment in the current queue
-                                            val targetIndex = playback.items.indexOfFirst { item ->
-                                                parseReadAloudMediaId(item.id)?.sourceOffset == segmentSourceOffset
-                                            }
-                                            if (targetIndex >= 0) {
-                                                playbackController?.playItem(targetIndex)
-                                                return@detectTapGestures
-                                            }
+                                    // Tap-to-Read: seek to the sentence that was tapped. The old code
+                                    // ignored the tapped sentence and replayed the current segment from
+                                    // its start.
+                                    val spokenOffset = spokenIndexMap?.let { spokenOffsetForTap(offset, it) }
+                                    if (spokenOffset != null && playback.current?.contentType == PlaybackContentType.READ_ALOUD) {
+                                        val target = ReadAloudSegmentMapping.resolveTapTarget(
+                                            tapSourceOffset = spokenOffset.toLong(),
+                                            queueItemSourceOffsets = playback.items.map { item ->
+                                                parseReadAloudMediaId(item.id)?.sourceOffset
+                                            },
+                                            currentItemIndex = playback.currentIndex,
+                                            currentSegmentMap = currentSegmentMap,
+                                        )
+                                        if (target != null) {
+                                            playbackController?.playItem(target.queueItemIndex, target.positionMs)
+                                            return@detectTapGestures
                                         }
                                     }
                                     // Regular tap: set reading position

@@ -1,6 +1,7 @@
 package com.joy.murmur.playback
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -11,33 +12,45 @@ import org.junit.Test
 class ReadAloudUtilsTest {
 
     @Test
-    fun spokenIndexMapIsBoundedAndMonotonic() {
-        val source = "one *two* three [four](https://example.com)"
+    fun spokenIndexMapIsIndexPreservingSoItMatchesSpeechOffsets() {
+        val source = "one *two* three"
         val map = ReadAloudUtils.buildSpokenIndexMap(source)
         assertEquals(source.length, map.size)
-        var previous = -1
-        map.forEach { spokenIndex ->
-            if (spokenIndex < 0) {
-                assertTrue("unmapped entries must be syntax or whitespace", spokenIndex == -1)
-            } else {
-                assertTrue("spoken indexes must increase", spokenIndex > previous)
-                previous = spokenIndex
-            }
-        }
-        assertTrue("some text must remain spoken", previous >= 0)
+        // Surviving characters keep their own index: the generator's offsets are plain string
+        // indexes into the same text. An earlier version numbered only non-space characters, which
+        // shifted every offset by the number of preceding spaces.
+        assertEquals(0, map[0])
+        assertEquals(source.indexOf("two"), map[source.indexOf("two")])
+        assertEquals(source.indexOf("three"), map[source.indexOf("three")])
+        // Stripped markup is not spoken.
+        assertEquals(-1, map[source.indexOf('*')])
     }
 
     @Test
-    fun inverseSpokenIndexMapIsMonotonicAndInBounds() {
+    fun spokenIndexMapForPlainTextAcceptsEveryCharacter() {
+        val source = "1 * 2 is not markdown here\n- and neither is this\n"
+        val map = ReadAloudUtils.buildSpokenIndexMap(source, ReadAloudUtils.speechTextFor(source, "text/plain"))
+        map.indices.forEach { index -> assertEquals("index $index must stay spoken", index, map[index]) }
+    }
+
+    @Test
+    fun speechTextOnlyStripsMarkdownForMarkdownDocuments() {
+        val source = "## Title"
+        assertEquals(source, ReadAloudUtils.speechTextFor(source, "text/plain"))
+        assertTrue(ReadAloudUtils.speechTextFor(source, "text/markdown").startsWith(" "))
+    }
+
+    @Test
+    fun tapOnSpokenTextMapsToItsSpokenOffsetAndTapsOnSyntaxDoNot() {
         val source = "one *two* three"
-        val inverse = ReadAloudUtils.buildInverseSpokenIndexMap(ReadAloudUtils.buildSpokenIndexMap(source))
-        assertTrue(inverse.isNotEmpty())
-        inverse.indices.forEach { spokenIndex ->
-            assertTrue(inverse[spokenIndex] in source.indices)
-            if (spokenIndex > 0) {
-                assertTrue(inverse[spokenIndex] >= inverse[spokenIndex - 1])
-            }
-        }
+        val map = ReadAloudUtils.buildSpokenIndexMap(source)
+        // "one" is spoken as is, so rendered and spoken offsets agree there.
+        assertEquals(0, ReadAloudUtils.spokenOffsetForTap(0, map))
+        // The asterisks are markup: tapping them must not resolve to a spoken offset.
+        val firstStar = source.indexOf('*')
+        assertNull(ReadAloudUtils.spokenOffsetForTap(firstStar, map))
+        assertNull("out-of-range taps are ignored", ReadAloudUtils.spokenOffsetForTap(-1, map))
+        assertNull(ReadAloudUtils.spokenOffsetForTap(source.length, map))
     }
 
     @Test

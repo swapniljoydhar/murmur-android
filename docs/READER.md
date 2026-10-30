@@ -26,9 +26,10 @@ On providers that expose size and last-modified metadata, the source fingerprint
 - Bookmarks and saved position; the open reader follows persisted Read Aloud segment positions
 - EPUB table of contents with navigation to readable spine-chapter starts; in-chapter fragment links are not mapped
 - Search in supported text formats; PDF search requires API 35+ and extractable page text
-- Read Aloud from the current text page with generated speech offsets mapped back to the source document; Markdown syntax cleanup preserves source indexes
-- **Sentence highlighting during Read Aloud**: Approximation via `segmentDurationMs / sentenceCount` per sentence; segment-level fallback when no sentence map.
-- **Tap-to-Read**: Tap any sentence in plain text reader → speech seeks to that sentence (±1 sentence tolerance). Markdown syntax in rendered text vs. stripped speech text is correctly mapped.
+- Read Aloud from the current text page with generated speech offsets mapped back to the source document; Markdown syntax cleanup preserves source indexes, and the speech engine is given exactly the text the index map was built from
+- **Sentence highlighting during Read Aloud** (plain TXT only): the sentence index is `positionMs * sentenceCount / segmentDurationMs`, and the highlighted range comes from the persisted sentence offsets. Durations are assumed to be split evenly across sentences because system TTS reports no per-sentence timing, so long or punctuation-heavy sentences can drift by a sentence. There is no highlight when no sentence map exists, and no sentence highlight for Markdown, HTML, EPUB or PDF pages.
+- **Tap-to-Read** (plain TXT only): tapping a spoken sentence selects that sentence, and playback seeks to its share of the current segment's duration. Tapping a character that markup cleanup stripped is ignored and falls through to setting the reading position. Tapping a sentence that belongs to a *later* segment jumps to that segment's start rather than to the sentence inside it, because only the current segment's map is loaded.
+- Sentence maps are written by both producers — the reader when Read Aloud starts on the visible page, and the playback service when it synthesizes the continuation page — so highlighting works from the first page, not only after the reader moves on.
 - **Return to Text**: Stop Read Aloud → reader scrolls to last spoken sentence position (via `savePosition` + observed position change).
 
 Read Aloud position following is segment-level. Continuous in-page synchronization to audio time is not implemented (system TTS provides no word/sentence timing).

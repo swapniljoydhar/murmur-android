@@ -360,11 +360,18 @@ class PlaybackController(
         )
     }
     
-    fun playItem(index: Int) {
+    /**
+     * Jumps to a queue item, optionally at an offset inside it.
+     *
+     * The seek and the item switch are one controller call: [playItem] followed by [seekTo] would race
+     * the asynchronous media-item transition, which is how a tap-to-read seek could land on the
+     * previous segment.
+     */
+    fun playItem(index: Int, positionMs: Long = 0L) {
         controllerLock.lock()
         try {
             controller?.let { player ->
-                player.seekToDefaultPosition(index)
+                player.seekTo(index, positionMs.coerceAtLeast(0L))
                 player.play()
             }
         } finally {

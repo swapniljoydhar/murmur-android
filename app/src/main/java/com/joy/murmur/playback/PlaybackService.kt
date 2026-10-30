@@ -400,7 +400,7 @@ class PlaybackService : MediaSessionService() {
             val generator = getTtsGenerator()
             try {
                 generator.selectVoice(selectedVoice, strictOffline)
-                val speechText = if (document.mimeType == "text/markdown") ReadAloudUtils.markdownForSpeech(sourcePage) else sourcePage
+                val speechText = ReadAloudUtils.speechTextFor(sourcePage, document.mimeType)
                 val identity = SynthesisIdentity(
                     engine = "android_tts",
                     engineVersion = "1",
@@ -492,7 +492,7 @@ class PlaybackService : MediaSessionService() {
             val generator = getTtsGenerator()
             try {
                 generator.selectVoice(selectedVoice, strictOffline)
-                val speechText = if (document.mimeType == "text/markdown") ReadAloudUtils.markdownForSpeech(sourcePage) else sourcePage
+                val speechText = ReadAloudUtils.speechTextFor(sourcePage, document.mimeType)
                 val identity = SynthesisIdentity(
                     engine = "android_tts",
                     engineVersion = "1",
@@ -575,29 +575,8 @@ private suspend fun persistSegmentMap(
         pageLength: Int,
         generated: List<com.joy.murmur.data.speech.GeneratedSpeechFile>,
     ) = withContext(Dispatchers.IO) {
-        val database = PlaybackDatabase.getInstance(this@PlaybackService)
-        val dao = database.playbackDao()
-        val entities = generated.map { segment ->
-            // Use the accurate sentence start offsets from the generator (spoken-character offsets)
-            val sentenceIds = segment.sentenceIds
-            val sentenceStartOffsets = segment.sentenceStartOffsets.map { it.toLong() }
-            // Add final offset (end of segment) = segment sourceOffset + spokenLength
-            val segmentEndOffset = segment.sourceOffset.toLong() + segment.spokenLength
-            val allOffsets = sentenceStartOffsets + segmentEndOffset
-
-            ReadAloudSegmentMapEntity(
-                documentId = documentId,
-                sourceOffset = segment.sourceOffset.toLong(),
-                sentenceIdsJson = Json.encodeToString(sentenceIds),
-                sentenceStartOffsetsJson = Json.encodeToString(allOffsets),
-                sourcePageStart = pageStart,
-                sourcePageLength = pageLength,
-                segmentDurationMs = segment.durationMs.coerceAtLeast(1),
-            )
-        }
-        if (entities.isNotEmpty()) {
-            dao.insertSegmentMaps(entities)
-        }
+        val dao = PlaybackDatabase.getInstance(this@PlaybackService).playbackDao()
+        persistReadAloudSegmentMap(dao, documentId, pageStart, pageLength, generated)
     }
 
     private inner class LocalControllerCallback : MediaSession.Callback {

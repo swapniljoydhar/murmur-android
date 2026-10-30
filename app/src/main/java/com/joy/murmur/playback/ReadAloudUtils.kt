@@ -2,8 +2,6 @@ package com.joy.murmur.playback
 
 import java.nio.charset.StandardCharsets
 import kotlin.text.Regex
-import kotlinx.serialization.json.Json
-import com.joy.murmur.data.playback.ReadAloudSegmentMapEntity
 
 /**
  * Pure text helpers for Read Aloud. Media ID encoding lives in ReadAloudMediaId.kt and is the only place
@@ -41,49 +39,32 @@ object ReadAloudUtils {
         return output.concatToString()
     }
 
+    /** The exact text handed to the speech engine for a page, so offsets can be mapped back. */
+    fun speechTextFor(pageText: String, mimeType: String?): String =
+        if (mimeType == "text/markdown") markdownForSpeech(pageText) else pageText
+
     /**
-     * Builds a mapping from rendered text index to spoken text index.
-     * Since `markdownForSpeech` preserves string length by replacing Markdown syntax with spaces,
-     * this map tells us which rendered characters correspond to spoken characters.
-     * Returns -1 for syntax characters (which are replaced with spaces in spoken text).
+     * Builds a mapping from rendered text index to speech text index.
+     *
+     * [markdownForSpeech] preserves length by replacing markup with spaces, so a surviving character
+     * keeps its own index and stripped markup maps to -1. This must stay index-preserving: the
+     * generator's `sourceOffset` and `sentenceStartOffsets` are plain string indices into
+     * [speechText], so any compression here (an earlier version dropped every space from the
+     * numbering) shifts highlighting and tap-to-read by the number of preceding spaces.
      */
-    fun buildSpokenIndexMap(sourcePageText: String): IntArray {
-        val spokenText = markdownForSpeech(sourcePageText)
-        val map = IntArray(sourcePageText.length) { -1 }
-        var spokenIdx = 0
-        for (i in sourcePageText.indices) {
-            if (spokenText[i] != ' ') {
-                map[i] = spokenIdx
-                spokenIdx++
-            }
+    fun buildSpokenIndexMap(sourcePageText: String, speechText: String = markdownForSpeech(sourcePageText)): IntArray {
+        require(speechText.length == sourcePageText.length) { "speech text must preserve source offsets" }
+        return IntArray(sourcePageText.length) { index ->
+            if (speechText[index] == sourcePageText[index]) index else -1
         }
-        return map
     }
 
     /**
-     * Maps a tap offset in the rendered text to the segment's sourceOffset.
-     * Returns the sourceOffset if the tap lands on a spoken character, null if on syntax.
+     * Maps a tap offset in the rendered text to the spoken (synthesized) offset.
+     * Returns null when the tap landed on markup that is not spoken.
      */
-    fun mapTapOffsetToSegment(
-        tapOffsetInRendered: Int,
-        spokenIndexMap: IntArray,
-        segmentMap: ReadAloudSegmentMapEntity,
-    ): Long? {
-        if (tapOffsetInRendered !in 0..spokenIndexMap.lastIndex) return null
-        val spokenIdx = spokenIndexMap[tapOffsetInRendered]
-        if (spokenIdx < 0) return null  // tapped on syntax char
-        
-        val sentenceOffsets = Json.decodeFromString<List<Long>>(segmentMap.sentenceStartOffsetsJson)
-        var sentenceIdx = 0
-        for (idx in sentenceOffsets.indices) {
-            if (sentenceOffsets[idx] <= spokenIdx) {
-                sentenceIdx = idx
-            } else {
-                break
-            }
-        }
-        return segmentMap.sourceOffset
-    }
+    fun spokenOffsetForTap(tapOffsetInRendered: Int, spokenIndexMap: IntArray): Int? =
+        spokenIndexMap.getOrNull(tapOffsetInRendered)?.takeIf { it >= 0 }
 
     /**
      * Builds the inverse mapping from spoken text index to rendered text index.
