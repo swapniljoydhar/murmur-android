@@ -84,11 +84,19 @@ class PlaybackService : MediaSessionService() {
                     cancelReadAloudWork()
                     return
                 }
-                if (mediaId.startsWith("read_aloud_start")) {
-                    val documentId = mediaId.split('|').getOrNull(1)?.let(Uri::decode)
+                if (isReadAloudStartMediaId(mediaId)) {
+                    val request = parseReadAloudStartMediaId(mediaId)
+                    val documentId = request?.documentId
                     cancelReadAloudWork()
                     readAloudStartDocumentId = documentId
                     documentId?.let(ReadAloudStatus::clearFailure)
+                    if (request == null) {
+                        ReadAloudStatus.reportFailure(
+                            documentId ?: "",
+                            "This Read Aloud request is damaged. Open the document and start again.",
+                        )
+                        return
+                    }
                     val job = serviceScope.launch(Dispatchers.IO) {
                         try {
                             startReadAloud(mediaId)
@@ -418,7 +426,7 @@ class PlaybackService : MediaSessionService() {
                 
                 val mediaItems = generated.map { segment ->
                     MediaItem.Builder()
-                        .setMediaId(ReadAloudUtils.readAloudMediaId(
+                        .setMediaId(readAloudMediaId(
                             document.id,
                             nextStart,
                             sourcePage.length,
@@ -455,13 +463,12 @@ class PlaybackService : MediaSessionService() {
 
 
     private suspend fun startReadAloud(mediaId: String) {
-        val fields = mediaId.split('|')
-        if (fields.size < 6 || fields[0] != "read_aloud_start") return
-        val documentId = Uri.decode(fields[1])
-        val startChar = fields[2].toLongOrNull() ?: return
-        val mimeType = fields[3]
-        val strictOffline = fields[4] == "true"
-        val continuous = fields[5] == "continuous"
+        val request = parseReadAloudStartMediaId(mediaId) ?: return
+        val documentId = request.documentId
+        val startChar = request.startChar
+        val mimeType = request.mimeType
+        val strictOffline = request.strictOffline
+        val continuous = request.continuous
         ReadAloudStatus.clearFailure(documentId)
 
         runCatching {
@@ -511,7 +518,7 @@ class PlaybackService : MediaSessionService() {
                 
                 val mediaItems = generated.map { segment ->
                     MediaItem.Builder()
-                        .setMediaId(ReadAloudUtils.readAloudMediaId(
+                        .setMediaId(readAloudMediaId(
                             document.id,
                             startChar,
                             sourcePage.length,

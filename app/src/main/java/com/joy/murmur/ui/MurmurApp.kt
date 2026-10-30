@@ -114,6 +114,7 @@ import com.joy.murmur.playback.playbackPositionAtFraction
 import com.joy.murmur.playback.playbackPositionFraction
 import com.joy.murmur.playback.ReadAloudStatus
 import com.joy.murmur.playback.parseReadAloudMediaId
+import com.joy.murmur.playback.parseReadAloudStartMediaId
 import com.joy.murmur.playback.SleepTimer
 import com.joy.murmur.playback.SelectedAudio
 import com.joy.murmur.playback.readAloudMediaId
@@ -520,7 +521,10 @@ private fun MurmurNavigation(
                 controller = playbackController,
                 audiobookLibraryRepository = audiobookLibraryRepository,
                 onReturnToDocument = {
-                    val documentId = playback.current?.id?.split('|')?.getOrNull(1)?.let(Uri::decode)
+                    val documentId = playback.current?.id?.let { mediaId ->
+                        parseReadAloudMediaId(mediaId)?.documentId
+                            ?: parseReadAloudStartMediaId(mediaId)?.documentId
+                    }
                     if (documentId != null) navController.navigate("reader/${Uri.encode(documentId)}")
                     else navController.navigate(Destination.Documents.route)
                 },
@@ -2219,8 +2223,7 @@ private fun ReadAloudPlayerScreen(snapshot: PlaybackSnapshot, controller: Playba
     val current = snapshot.current ?: return
     val failure by ReadAloudStatus.failure.collectAsState()
     val currentDocumentId = parseReadAloudMediaId(current.id)?.documentId
-        ?: current.id.takeIf { it.startsWith("read_aloud_start|") }
-            ?.split('|')?.getOrNull(1)?.let(Uri::decode)
+        ?: parseReadAloudStartMediaId(current.id)?.documentId
     val currentFailure = failure?.takeIf { it.documentId == currentDocumentId }
     val context = LocalContext.current
     val scope = rememberCoroutineScope()

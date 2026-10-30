@@ -259,7 +259,17 @@ class PlaybackController(
 
     fun startReadAloud(documentId: String, documentTitle: String, documentUri: Uri, mimeType: String, startChar: Long, continuous: Boolean, strictOffline: Boolean) {
         val mediaItem = MediaItem.Builder()
-            .setMediaId("read_aloud_start|${Uri.encode(documentId)}|$startChar|$mimeType|${strictOffline}|${if (continuous) "continuous" else "page"}")
+            .setMediaId(
+                readAloudStartMediaId(
+                    ReadAloudStartRequest(
+                        documentId = documentId,
+                        startChar = startChar,
+                        mimeType = mimeType,
+                        strictOffline = strictOffline,
+                        continuous = continuous,
+                    ),
+                ),
+            )
             .setUri(documentUri)
             .setMediaMetadata(
                 MediaMetadata.Builder()
